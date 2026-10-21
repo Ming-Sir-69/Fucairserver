@@ -19,4 +19,8 @@ $arguments = @('-S',$source,'-B',$build,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'Native receiver CMake configuration failed' }
 & (Join-Path $compilerRoot 'cmake.exe') --build $build --parallel $Parallel
 if ($LASTEXITCODE -ne 0) { throw 'Native receiver source build failed' }
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
+if ((Get-Item -LiteralPath (Join-Path $build 'Fucairserver.exe')).VersionInfo.ProductVersion -ne $expectedVersion) {
+    throw 'The executable version resource is stale; refusing to package this build.'
+}
 Write-Output (Join-Path $build 'Fucairserver.exe')

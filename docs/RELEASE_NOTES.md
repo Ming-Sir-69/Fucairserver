@@ -1,4 +1,4 @@
-Fucairserver 0.2.1 Preview provides a Windows x64 installer and portable package
+Fucairserver 0.2.2 Preview provides a Windows x64 installer and portable package
 for AirPlay mirroring, Mac extended desktop and audio reception.
 
 - Native install/uninstall entry, Start menu and optional desktop shortcut.

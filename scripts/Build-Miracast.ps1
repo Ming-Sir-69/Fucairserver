@@ -35,4 +35,8 @@ $arguments = @('-S',$source,'-B',$build,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'Miracast host CMake configuration failed' }
 & (Join-Path $compilerRoot 'cmake.exe') --build $build --parallel $Parallel
 if ($LASTEXITCODE -ne 0) { throw 'Miracast host source build failed' }
+$expectedVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
+if ((Get-Item -LiteralPath (Join-Path $build 'Fucairserver.Miracast.exe')).VersionInfo.ProductVersion -ne $expectedVersion) {
+    throw 'The Miracast version resource is stale; refusing to package this build.'
+}
 Write-Output (Join-Path $build 'Fucairserver.Miracast.exe')

@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index efb9bb1..df051aa 100644
+index efb9bb1..1dd61f0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -12,6 +12,9 @@ if(MSVC)
@@ -12,7 +12,7 @@ index efb9bb1..df051aa 100644
  
  # ---- libplist (required) ------------------------------------------------------
  # UxPlay uses libplist to serialise the /info, ANNOUNCE and other RTSP bodies.
-@@ -341,6 +344,15 @@ add_executable(airplay-windows
+@@ -341,6 +344,22 @@ add_executable(airplay-windows
  )
  
  target_include_directories(airplay-windows PRIVATE src)
@@ -23,12 +23,19 @@ index efb9bb1..df051aa 100644
 +    enable_language(RC)
 +    target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc")
 +    set_source_files_properties("${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc" PROPERTIES INCLUDE_DIRECTORIES "${FUCAIRSERVER_PROJECT_ROOT}/src")
++    set_property(SOURCE "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc" APPEND PROPERTY OBJECT_DEPENDS
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/version.generated.h"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.manifest")
++    if(EXISTS "${FUCAIRSERVER_PROJECT_ROOT}/assets/Fucairserver.ico")
++        set_property(SOURCE "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc" APPEND PROPERTY OBJECT_DEPENDS
++            "${FUCAIRSERVER_PROJECT_ROOT}/assets/Fucairserver.ico")
++    endif()
 +endif()
 +set_target_properties(airplay-windows PROPERTIES OUTPUT_NAME "Fucairserver")
  target_link_libraries(airplay-windows PRIVATE OpenSSL::Crypto ${FFMPEG_TARGETS} ${SDL2_TARGET} ${SDL2_TTF_TARGET} imgui)
  if(_use_gst AND GSTREAMER_FOUND)
      target_link_libraries(airplay-windows PRIVATE PkgConfig::GSTREAMER)
-@@ -418,7 +430,7 @@ if(WIN32)
+@@ -418,7 +437,7 @@ if(WIN32)
      # VideoRenderer window.
      target_link_libraries(airplay-windows PRIVATE
          ws2_32 iphlpapi dnsapi dwmapi d3d11
@@ -37,7 +44,7 @@ index efb9bb1..df051aa 100644
  
      # Released as a GUI app so no empty console window pops up when
      # launched from File Explorer. main() stays the entry point — the
-@@ -457,7 +469,7 @@ endif()
+@@ -457,7 +476,7 @@ endif()
  # system GStreamer install put them and let gst_init() find them via
  # its registered plugin path — practically: as long as the user has
  # GStreamer's bin/ on PATH the plugins resolve at startup.
@@ -46,7 +53,7 @@ index efb9bb1..df051aa 100644
      add_custom_command(TARGET airplay-windows POST_BUILD
          COMMAND ${CMAKE_COMMAND} -E copy_if_different
              $<TARGET_RUNTIME_DLLS:airplay-windows>
-@@ -488,7 +500,7 @@ if(BUILD_NETWORK_TESTS)
+@@ -488,7 +507,7 @@ if(BUILD_NETWORK_TESTS)
      add_executable(test-firewall tools/test_firewall.cpp src/platform/firewall.cpp)
      target_include_directories(test-firewall PRIVATE src)
      if(WIN32)

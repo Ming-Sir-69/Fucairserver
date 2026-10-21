@@ -13,6 +13,12 @@ if(NOT EXISTS "${FUCAIRSERVER_CPPWINRT_INCLUDE}/winrt/Windows.Media.Miracast.h")
     message(FATAL_ERROR "C++/WinRT projection is absent; run scripts/Build-Miracast.ps1")
 endif()
 add_executable(Fucairserver.Miracast WIN32 main.cpp Fucairserver.rc)
+set_property(SOURCE Fucairserver.rc APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../version.generated.h")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/Fucairserver.ico")
+    set_property(SOURCE Fucairserver.rc APPEND PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/Fucairserver.ico")
+endif()
 target_include_directories(Fucairserver.Miracast SYSTEM PRIVATE "${FUCAIRSERVER_CPPWINRT_INCLUDE}")
 target_compile_definitions(Fucairserver.Miracast PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_compile_options(Fucairserver.Miracast PRIVATE -mcx16 -fno-devirtualize -finput-charset=UTF-8)
