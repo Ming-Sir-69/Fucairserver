@@ -1,0 +1,15 @@
+* text=auto
+*.cpp text eol=lf
+*.h text eol=lf
+*.mjs text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.ico binary
+*.patch -text -whitespace
+LICENSE -whitespace
+*.yml text eol=lf
+*.rc text eol=lf
+*.manifest text eol=lf
+VERSION text eol=lf

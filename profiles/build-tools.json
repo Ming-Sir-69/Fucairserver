@@ -1,0 +1,13 @@
+{
+  "inno_setup": {
+    "version": "7.1.0",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe",
+    "sha256": "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+  },
+  "cppwinrt": {
+    "version": "3.0.260818.1",
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.cppwinrt/3.0.260818.1/microsoft.windows.cppwinrt.3.0.260818.1.nupkg",
+    "sha256": "a8993608ae9263a8288e1a1d9ee2684a5632f4acc59e1e89ddd86b3b889a7367",
+    "generator_sha256": "90933a0b577bb8e5554d87fc402880aa576dfef5e7b72cc9dba2822e3a6f458e"
+  }
+}

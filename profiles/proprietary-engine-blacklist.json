@@ -1,0 +1,87 @@
+{
+  "purpose": "Reject original proprietary AirServer executable/engine DLLs from the independent build",
+  "reference": "AirServer Universal 5.7.2.0",
+  "files": [
+    {
+      "path": "ADRuntime.dll",
+      "sha256": "7e3b8d0877aa7b24a173a264f6b000b7cac0578f17a2a19372e993ecafa7c114",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "c10c1ac6892407df86fbed5f7ba4c67f707991071377a5d097d7cb29f36bf2d3",
+          "bytes": 720384
+        }
+      ]
+    },
+    {
+      "path": "ADSparkle.dll",
+      "sha256": "e9327d480ba55bf52691b1366067f39fd80d11d80f07fad213f6c2cec6d99969",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "43f6f27df909604b93350d2624f90b45d036b59024b84e97c8ac049483fa221e",
+          "bytes": 91648
+        }
+      ]
+    },
+    {
+      "path": "AirServer.exe",
+      "sha256": "134a95c53b105e9d48f34289ea5694fcb836ecb751f31e62123c45ef50e6a7df",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "5aeb729a4ebcb25f734f136b8c27c62b4766fd3b377d449d3d0deb7b0c70e70d",
+          "bytes": 8472576
+        }
+      ]
+    },
+    {
+      "path": "AirServerConsole.exe",
+      "sha256": "b6296affb441c0fde1c7d5bf4e04a94f67ea7bb44dc1ffa466998ea922d11777",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "88430a869dc4516be63810b9900f4a3a99c119995808213bb37dbefe7eab65c3",
+          "bytes": 4608
+        }
+      ]
+    },
+    {
+      "path": "AirServerEvents.dll",
+      "sha256": "4c1ae14b4870339b93742f769d74b7fd7f4b30cab07d24c948f11406372e397e",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "d4f28ef610b5e0677a8e3d11447ad1f2840f4ca08e6cdb130140df731b5851b0",
+          "bytes": 10752
+        }
+      ]
+    },
+    {
+      "path": "AirServerEvents.man",
+      "sha256": "2b6ecf25d0e30d7269d50cdc4d8e7c68369075dafc36c195c7cf435e872d29d0"
+    },
+    {
+      "path": "AirServerMediaFoundationObjects.dll",
+      "sha256": "6e437b4f2903b38fb7356e5a92199ea3a5d0a4067ae9ddeceacd20fd96d043c8",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "c7887d6098a6a5c5403b92dda0b2c88028801ffa6aadf3d1c37778187d0aabc1",
+          "bytes": 66560
+        }
+      ]
+    },
+    {
+      "path": "AirServerMediaHandlers.dll",
+      "sha256": "cc6665f1633fdd9f7f4a4317c55bd9fa69f23813b51b9f55f24048278d3d7f3f",
+      "code_sections": [
+        {
+          "name": ".text",
+          "sha256": "2e18af773131dd3990b2b3af178239472a0f01700fb89c99795f5d3adf4ede71",
+          "bytes": 55296
+        }
+      ]
+    }
+  ]
+}

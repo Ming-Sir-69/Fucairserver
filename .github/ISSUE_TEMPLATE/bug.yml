@@ -1,0 +1,23 @@
+name: Bug report
+description: Report an installation, connection or playback problem
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Fucairserver version
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      description: Include architecture and whether the app is installed or portable.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and actual result
+      description: Include sender device/OS for connection problems. Do not include keys or private captures.
+    validations:
+      required: true
