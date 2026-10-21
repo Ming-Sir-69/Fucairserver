@@ -20,11 +20,37 @@ if (Test-Path -LiteralPath $registryPath) { throw 'An installed product already 
 if (Get-Process -Name Fucairserver -ErrorAction SilentlyContinue) { throw 'Exit Fucairserver before installer acceptance.' }
 $dataDirectory = Join-Path (Split-Path -Parent $InstallDir) '配置 data'
 [IO.Directory]::CreateDirectory($dataDirectory) | Out-Null
+$settings = Join-Path $dataDirectory 'settings.ini'
+$wantedPreferences = [ordered]@{
+    receiver_name='验收接收器'; mirror_width='1920'; mirror_height='1080';
+    hevc_enabled='0'; max_fps='30'; refresh_rate='30'; mirror_hwaccel='0';
+    vsync_enabled='0'; recording_directory=(Join-Path $dataDirectory '录制 saved');
+    recording_codec='0'; recording_encoder='0'; recording_bitrate='12';
+    video_rotation='-1'; diagnostics='0'
+}
+$seed = @($wantedPreferences.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) -join "`n"
+[IO.File]::WriteAllText($settings,$seed + "`n",[Text.UTF8Encoding]::new($false))
 $checks = [Collections.Generic.List[string]]::new()
 function Check([bool]$Condition, [string]$Label) {
     if (-not $Condition) { throw "Acceptance failed: $Label" }
     $checks.Add($Label)
     Write-Host "PASS $Label"
+}
+function Preferences-Match {
+    $actual = @{}
+    foreach ($line in (Get-Content -LiteralPath $settings -Encoding utf8)) {
+        $pair = $line -split '=',2
+        if ($pair.Count -eq 2) { $actual[$pair[0]] = $pair[1] }
+    }
+    # Window placement may be clamped to a different headless/desktop work area.
+    # Validate every seeded user preference, rather than hashing transient geometry.
+    foreach ($entry in $wantedPreferences.GetEnumerator()) {
+        if ($actual[$entry.Key] -cne $entry.Value) {
+            Write-Host ('Changed preference: ' + $entry.Key)
+            return $false
+        }
+    }
+    return $true
 }
 function Run-Setup {
     $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/LANG=english',('/DIR="' + $InstallDir + '"'),'/TASKS=firewall')
@@ -96,7 +122,6 @@ try {
     $secondary = Run-App @('--listen-port', $Port.ToString()) $true
     Check ($secondary.WaitForExit(10000) -and $secondary.ExitCode -eq 0) 'Second launch activates the existing instance'
     Exit-App $receiver
-    $settings = Join-Path $dataDirectory 'settings.ini'
     $key = Join-Path $dataDirectory 'receiver.key'
     Check ((Get-Content -LiteralPath $settings -Raw) -match 'receiver_name=验收接收器') 'Unicode receiver name persists in user profile'
     if (-not (Test-Path -LiteralPath $key)) {
@@ -105,7 +130,7 @@ try {
         $key = $keys[0].FullName
     }
     $keyHash = (Get-FileHash -LiteralPath $key -Algorithm SHA256).Hash
-    $settingsHash = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
+    Check (Preferences-Match) 'All seeded name, resolution, recording and playback preferences persist'
     Check (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'imgui.ini'))) 'Application creates no layout file in installed program directory'
     # Repair/upgrade while the application is running must close it gracefully.
     $receiver = Run-App @('--listen-port', $Port.ToString())
@@ -113,7 +138,7 @@ try {
     Run-Setup
     Check ($receiver.WaitForExit(15000)) 'Running app exits before upgrade replaces its files'
     Check ((Get-FileHash -LiteralPath $key -Algorithm SHA256).Hash -eq $keyHash) 'Repair/upgrade preserves pairing identity'
-    Check ((Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash -eq $settingsHash) 'Repair/upgrade preserves saved settings'
+    Check (Preferences-Match) 'Repair/upgrade preserves all saved user preferences'
     $receiver = Run-App @('--listen-port', $Port.ToString())
     Check (Rtsp-Ready $receiver) 'Upgraded app starts and accepts RTSP'
     $uninstall = Start-Process -FilePath (Join-Path $InstallDir 'unins000.exe') -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -WindowStyle Hidden -PassThru

@@ -1,8 +1,8 @@
 [CmdletBinding()]
-param()
+param([switch]$WorkspaceBuild)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$program = Join-Path $projectRoot 'dist/Fucairserver/Fucairserver.exe'
+$program = & (Join-Path $PSScriptRoot 'Resolve-Application.ps1') -WorkspaceBuild:$WorkspaceBuild
 $receiver = Get-Process -Name Fucairserver -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $program } | Select-Object -First 1
 if (-not $receiver) { Write-Host 'Fucairserver 已退出。'; return }
 if ($receiver.Path -ne $program) { throw '运行进程身份已变化，未执行退出。' }

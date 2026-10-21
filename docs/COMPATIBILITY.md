@@ -3,7 +3,7 @@
 | Platform | Target | Current verification |
 | --- | --- | --- |
 | Windows 10 22H2, x64, build 19045 | Supported target | Desktop installation and sender tests required before stable |
-| Windows 11 x64 | Current acceptance scope | 29 local installer lifecycle checks, source regressions and a fresh GitHub source rebuild passed |
+| Windows 11 x64 | Current acceptance scope | Local installer lifecycle, source regressions and a fresh GitHub source rebuild passed |
 | Windows Server 2022 / 2025 x64 | CI environment | Automated build, unit tests and installer lifecycle |
 | Windows ARM64 or 32-bit | Outside this release | Installer refuses these architectures |
 

@@ -2,12 +2,13 @@
 param(
     [string]$ReceiverName,
     [ValidateRange(1,65535)][int]$ListenPort = 7010,
-    [switch]$ConfigureFirewall
+    [switch]$ConfigureFirewall,
+    [switch]$WorkspaceBuild
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$applicationDirectory = Join-Path $projectRoot 'dist/Fucairserver'
-$program = Join-Path $applicationDirectory 'Fucairserver.exe'
+$program = & (Join-Path $PSScriptRoot 'Resolve-Application.ps1') -WorkspaceBuild:$WorkspaceBuild
+$applicationDirectory = Split-Path -Parent $program
 if (-not (Test-Path -LiteralPath $program)) { throw "找不到 Fucairserver：$program" }
 $hasNameOverride = $PSBoundParameters.ContainsKey('ReceiverName')
 if ($hasNameOverride -and ([string]::IsNullOrWhiteSpace($ReceiverName) -or $ReceiverName.Contains('"') -or $ReceiverName.IndexOfAny([char[]]"`r`n") -ge 0)) { throw '接收端名称不能为空或包含引号、换行。' }

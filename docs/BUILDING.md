@@ -72,6 +72,8 @@ shortcuts, scoped network rules and uninstall cleanup. Test-generated files
 remain under ignored `build/`. The opt-in `FUCAIRSERVER_DATA_DIR` environment
 variable selects an absolute portable profile directory; normal launches keep
 using the current user's AppData.
+The Start/Stop helpers prefer the registered installed application; use
+`-WorkspaceBuild` to select the workspace's portable build for maintenance.
 
 GitHub-hosted Windows Server runners exercise builds and installer lifecycle;
 they do not establish real Windows 10/11 desktop, Wi-Fi driver or sender-device
