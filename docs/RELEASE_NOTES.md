@@ -1,4 +1,4 @@
-Fucairserver 0.2.0 Preview provides a Windows x64 installer and portable package
+Fucairserver 0.2.1 Preview provides a Windows x64 installer and portable package
 for AirPlay mirroring, Mac extended desktop and audio reception.
 
 - Native install/uninstall entry, Start menu and optional desktop shortcut.
@@ -7,9 +7,9 @@ for AirPlay mirroring, Mac extended desktop and audio reception.
 - Recording defaults to the user's Videos folder; the app does not write layout files into Program Files.
 - Source and runtime dependencies are fixed by revision/hash; corresponding source, a CycloneDX SBOM and SHA-256 checksums accompany the binaries.
 
-Targets: Windows 10 22H2 x64 and Windows 11 x64. The desktop and sender-device
-acceptance matrix remains the gate for promotion to stable. CI runners use
-Windows Server; that does not replace Windows 10 desktop testing.
+This release is accepted on Windows 11 x64. Windows 10 22H2 x64 remains a
+compatibility target and has not been tested on a Windows 10 desktop.
+CI runners additionally exercise Windows Server installer lifecycle.
 
 This preview is unsigned by an identity-validated publisher certificate. Public
 packages omit the workstation's private icon and use the standard Windows

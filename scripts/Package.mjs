@@ -78,6 +78,7 @@ copyFileSync(join(root, 'LICENSE'), join(output, 'LICENSE.txt'));
 if (existsSync(join(root, 'docs/USER_GUIDE.md'))) copyFileSync(join(root, 'docs/USER_GUIDE.md'), join(output, 'README.md'));
 copyFileSync(join(root, 'third_party/imgui/LICENSE.txt'), join(licenses, 'Dear-ImGui-MIT.txt'));
 if (existsSync(miracasthost)) copyFileSync(join(root, 'src/miracast/THIRD_PARTY_NOTICES.md'), join(licenses, 'Miracast-host-NOTICES.md'));
+if (existsSync(miracasthost)) copyFileSync(join(root, 'third_party/miracast-reference/research/cppwinrt-tool/LICENSE'), join(licenses, 'Microsoft-CppWinRT-MIT.txt'));
 for (const item of usedPackages.values()) {
   for (const path of item.license_files) {
     const target = join(licenses, 'runtime', item.name, path.slice('ucrt64/share/licenses/'.length));
@@ -97,6 +98,19 @@ const sbom = {
     externalReferences: [{ type: 'website', url: item.upstream_url }],
   })),
 };
+const sourceLock = JSON.parse(readFileSync(join(root, 'profiles/source-lock.json'), 'utf8').replace(/^\uFEFF/, ''));
+sbom.components.push(...sourceLock.sources.map(source => ({
+  type: 'library', name: source.name, version: source.commit,
+  licenses: [{ license: { id: source.name === 'Dear ImGui' ? 'MIT' : 'GPL-3.0-only' } }],
+  externalReferences: [{ type: 'vcs', url: `${source.url}#${source.commit}` }],
+})));
+if (existsSync(miracasthost)) {
+  const tools = JSON.parse(readFileSync(join(root, 'profiles/build-tools.json'), 'utf8'));
+  sbom.components.push({ type: 'framework', name: 'Microsoft.Windows.CppWinRT', version: tools.cppwinrt.version,
+    purl: `pkg:nuget/Microsoft.Windows.CppWinRT@${tools.cppwinrt.version}`, licenses: [{ license: { id: 'MIT' } }],
+    externalReferences: [{ type: 'distribution', url: tools.cppwinrt.url }],
+  });
+}
 writeFileSync(join(output, 'sbom.cdx.json'), JSON.stringify(sbom, null, 2) + '\n');
 writeFileSync(join(output, 'release-manifest.json'), JSON.stringify({
   product: 'Fucairserver', version, architecture: 'x64', minimum_windows_build: 19045,
