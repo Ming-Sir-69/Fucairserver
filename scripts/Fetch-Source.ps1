@@ -4,6 +4,9 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $gitNetworkOptions = @()
 if ($Proxy) { $gitNetworkOptions = @('-c', ('http.proxy=' + $Proxy)) }
+# These are public pinned sources. Ignore stale user URL rewriting without
+# changing the user's Git configuration on disk.
+$env:GIT_CONFIG_GLOBAL = 'NUL'
 $sources = Get-Content -LiteralPath (Join-Path $projectRoot 'profiles/source-lock.json') -Raw | ConvertFrom-Json
 $bundlePath = Join-Path $projectRoot 'source-bundle.json'
 if (Test-Path -LiteralPath $bundlePath) {

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$PayloadDir, [string]$OutputDir)
+param([Parameter(Mandatory)][string]$PayloadDir, [string]$OutputDir, [switch]$SkipRuntimeSources)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
@@ -38,6 +38,7 @@ if (Test-Path -LiteralPath $sourceZip) { throw 'Source archive already exists; u
 $portableZip = Join-Path $OutputDir ("Fucairserver-$version-windows-x64.zip")
 if (Test-Path -LiteralPath $portableZip) { throw 'Portable archive already exists; use a fresh release output directory.' }
 [IO.Compression.ZipFile]::CreateFromDirectory($PayloadDir,$portableZip,[IO.Compression.CompressionLevel]::Optimal,$false)
+if (-not $SkipRuntimeSources) {
 $runtimeSource = Join-Path $projectRoot 'build/corresponding-sources'
 $sourceLockPath = Join-Path $projectRoot 'profiles/runtime-source-lock.json'
 $sourceLock = Get-Content -LiteralPath $sourceLockPath -Raw | ConvertFrom-Json
@@ -52,6 +53,7 @@ try {
     }
     $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$sourceLockPath,'runtime-source-lock.json',[IO.Compression.CompressionLevel]::Optimal)
 } finally { $zip.Dispose() }
+}
 Copy-Item -LiteralPath (Join-Path $PayloadDir 'sbom.cdx.json') -Destination (Join-Path $OutputDir ("Fucairserver-$version-sbom.cdx.json"))
 $assets = @(Get-ChildItem -LiteralPath $OutputDir -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' })
 $checksums = @($assets | Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name })
