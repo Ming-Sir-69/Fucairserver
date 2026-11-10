@@ -10,6 +10,8 @@
 *.patch -text -whitespace
 LICENSE -whitespace
 *.yml text eol=lf
+*.sh text eol=lf
+*.swift text eol=lf
 *.rc text eol=lf
 *.manifest text eol=lf
 VERSION text eol=lf
