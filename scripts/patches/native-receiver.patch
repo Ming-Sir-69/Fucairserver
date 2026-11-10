@@ -83,66 +83,16 @@ index efb9bb1..7433336 100644
      add_test(NAME firewall COMMAND test-firewall)
      add_test(NAME settings COMMAND test-settings)
      add_test(NAME socket-shutdown COMMAND test-shutdown)
-diff --git a/src/airplay/features.h b/src/airplay/features.h
-new file mode 100644
-index 0000000..fa891d6
---- /dev/null
-+++ b/src/airplay/features.h
-@@ -0,0 +1,24 @@
-+#pragma once
-+
-+#include <cstdint>
-+#include <cstdio>
-+#include <cstdlib>
-+#include <string>
-+
-+namespace ap::airplay {
-+
-+// Features bit 9: the receiver accepts sender audio. Without it the sender
-+// treats this PC as a screen and keeps its own sound output.
-+constexpr uint64_t kFeatureAudio = UINT64_C(1) << 9;
-+
-+// TXT/`features` form: "0xLOW" or "0xLOW,0xHIGH" (two 32-bit words).
-+inline std::string features_without_audio(const std::string& features) {
-+    const auto comma = features.find(',');
-+    const std::string low = features.substr(0, comma);
-+    const unsigned long word = std::strtoul(low.c_str(), nullptr, 16) & ~static_cast<unsigned long>(kFeatureAudio);
-+    char buf[16];
-+    std::snprintf(buf, sizeof(buf), "0x%lX", word);
-+    return comma == std::string::npos ? std::string(buf) : buf + features.substr(comma);
-+}
-+
-+} // namespace ap::airplay
-diff --git a/src/airplay/info_plist.cpp b/src/airplay/info_plist.cpp
-index a885e59..c14194d 100644
---- a/src/airplay/info_plist.cpp
-+++ b/src/airplay/info_plist.cpp
-@@ -1,4 +1,5 @@
- #include "airplay/info_plist.h"
-+#include "airplay/features.h"
- #include "airplay/live_settings.h"
- #include "airplay/routes.h"
- #include "log.h"
-@@ -121,6 +122,8 @@ std::vector<unsigned char> build_info_plist(const DeviceContext& ctx) {
-     uint64_t feat = parse_features(ctx.features);
-     if (hevc) feat |=  (UINT64_C(0x400) << 32);
-     else      feat &= ~(UINT64_C(0x400) << 32);
-+    if (ctx.live && !ctx.live->receive_audio.load(std::memory_order_relaxed))
-+        feat &= ~kFeatureAudio;
-     set_uint(root, "features",      feat);
-     set_uint(root, "statusFlags",   68);   // UxPlay default (bits 2+6 set)
-     set_uint(root, "vv",            2);
 diff --git a/src/airplay/live_settings.h b/src/airplay/live_settings.h
-index 768afb5..8344e34 100644
+index 768afb5..bed4339 100644
 --- a/src/airplay/live_settings.h
 +++ b/src/airplay/live_settings.h
-@@ -70,6 +70,11 @@ struct LiveSettings {
+@@ -70,6 +70,10 @@ struct LiveSettings {
      // Display only: -1 follows the orientation encoded by iOS; 0..3 adds
      // clockwise quarter turns to the received image. Recording is unchanged.
      std::atomic<int> video_rotation{-1};
-+    // Audio: advertise/accept sender audio (applies to new connections and
-+    // re-advertises discovery); local volume and mute apply live.
-+    std::atomic<bool> receive_audio{false};
++    // Local playback of received audio; all three apply live.
++    std::atomic<bool> play_audio{true};
 +    std::atomic<int>  output_volume{100};
 +    std::atomic<bool> output_muted{false};
  
@@ -221,28 +171,6 @@ index f058762..4c4ff34 100644
          reader_loop(client);
  
          {
-diff --git a/src/airplay/routes.cpp b/src/airplay/routes.cpp
-index 6f57a84..d1dbed3 100644
---- a/src/airplay/routes.cpp
-+++ b/src/airplay/routes.cpp
-@@ -3,6 +3,7 @@
- #include "airplay/client_session.h"
- #include "airplay/daap.h"
- #include "airplay/fcup.h"
-+#include "airplay/features.h"
- #include "airplay/hls_session.h"
- #include "airplay/info_plist.h"
- #include "airplay/live_settings.h"
-@@ -789,7 +790,8 @@ Response handle_server_info(const DeviceContext& ctx, const Request& req) {
-     copy_cseq(req, r);
- #if defined(HAVE_LIBPLIST)
-     plist_t root = plist_new_dict();
--    plist_dict_set_item(root, "features",       plist_new_uint(0x27F));
-+    const bool audio = !ctx.live || ctx.live->receive_audio.load(std::memory_order_relaxed);
-+    plist_dict_set_item(root, "features",       plist_new_uint(audio ? 0x27F : 0x27F & ~kFeatureAudio));
-     plist_dict_set_item(root, "macAddress",     plist_new_string(ctx.deviceid.c_str()));
-     plist_dict_set_item(root, "deviceid",       plist_new_string(ctx.deviceid.c_str()));
-     plist_dict_set_item(root, "model",          plist_new_string(ctx.model.c_str()));
 diff --git a/src/airplay/rtsp_parser.cpp b/src/airplay/rtsp_parser.cpp
 index b99e222..00a9079 100644
 --- a/src/airplay/rtsp_parser.cpp
@@ -474,7 +402,7 @@ index 414eda3..213ec1d 100644
  
  namespace ap::crypto {
 diff --git a/src/main.cpp b/src/main.cpp
-index 71c0f07..818b455 100644
+index 71c0f07..4bdec9e 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -1,4 +1,5 @@
@@ -809,7 +737,7 @@ index 71c0f07..818b455 100644
      live_settings.fullscreen.store(saved.fullscreen);
      live_settings.chromeless.store(saved.chromeless);
      live_settings.video_rotation.store(saved.video_rotation);
-+    live_settings.receive_audio.store(saved.receive_audio);
++    live_settings.play_audio.store(saved.play_audio);
 +    live_settings.output_volume.store(saved.output_volume);
 +    live_settings.output_muted.store(saved.output_muted);
      live_settings.set_ui_preferences(saved.ui);
@@ -872,28 +800,22 @@ index 71c0f07..818b455 100644
      // Keep the render thread available while workers finish GPU/audio teardown.
      std::atomic<bool> disconnect_requested{false};
      renderer.set_disconnect_handler([&disconnect_requested]() {
-@@ -342,11 +511,37 @@ int main(int argc, char** argv) {
+@@ -342,11 +511,31 @@ int main(int argc, char** argv) {
      auto last_saved_settings = ap::snapshot(live_settings);
      auto observed_settings = last_saved_settings;
      auto settings_changed_at = std::chrono::steady_clock::now();
 -    while (!g_stop && !renderer.user_closed()) {
 +    auto lan_checked_at = std::chrono::steady_clock::now();
-+    bool advertised_audio = live_settings.receive_audio.load();
 +    while (!g_stop && !renderer.user_closed() && !fucairserver::tray_exit_requested()) {
  #if defined(_WIN32)
          if (instance.activation_requested()) renderer.request_show();
  #endif
          const auto receiver_name = live_settings.receiver_name();
-+        const bool receive_audio = live_settings.receive_audio.load();
++        const bool play_audio = live_settings.play_audio.load();
 +        ap::audio::SdlAudioOutput::set_local_gain(
-+            !receive_audio || live_settings.output_muted.load()
++            !play_audio || live_settings.output_muted.load()
 +                ? 0.0f : live_settings.output_volume.load() / 100.0f);
 +        bool readvertise = false;
-+        if (receive_audio != advertised_audio) {
-+            advertised_audio = receive_audio;
-+            LOG_INFO << "Audio reception " << (receive_audio ? "on" : "off") << "; refreshing mDNS";
-+            readvertise = true;
-+        }
 +        if (std::chrono::steady_clock::now() - lan_checked_at >= std::chrono::seconds(10)) {
 +            lan_checked_at = std::chrono::steady_clock::now();
 +            std::string lan_ipv4 = ap::net::primary_ipv4();
@@ -912,19 +834,17 @@ index 71c0f07..818b455 100644
              mdns.stop();
              ctx.name = receiver_name;
 diff --git a/src/mdns/mdns_service.cpp b/src/mdns/mdns_service.cpp
-index ff63e26..c756994 100644
+index ff63e26..0523e1c 100644
 --- a/src/mdns/mdns_service.cpp
 +++ b/src/mdns/mdns_service.cpp
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,6 @@
  #include "mdns/mdns_service.h"
  #include "log.h"
 +#include "net/socket.h"
-+#include "airplay/features.h"
-+#include "airplay/live_settings.h"
  
  #include <atomic>
  #include <chrono>
-@@ -42,6 +45,180 @@ std::string narrow(PCWSTR ws) {
+@@ -42,6 +43,180 @@ std::string narrow(PCWSTR ws) {
      return out;
  }
  
@@ -1105,7 +1025,7 @@ index ff63e26..c756994 100644
  } // namespace
  
  // One registered service (either _airplay._tcp or _raop._tcp). Owns the
-@@ -75,6 +252,8 @@ struct RegisteredService {
+@@ -75,6 +250,8 @@ struct RegisteredService {
  struct MdnsService::Impl {
      std::shared_ptr<RegisteredService> airplay = std::make_shared<RegisteredService>();
      std::shared_ptr<RegisteredService> raop = std::make_shared<RegisteredService>();
@@ -1114,7 +1034,7 @@ index ff63e26..c756994 100644
  
      static void WINAPI on_complete(DWORD status, PVOID context,
                                     PDNS_SERVICE_INSTANCE inst) {
-@@ -96,6 +275,11 @@ struct MdnsService::Impl {
+@@ -96,6 +273,11 @@ struct MdnsService::Impl {
      bool register_service(const std::shared_ptr<RegisteredService>& service,
                            uint16_t port) {
          auto& s = *service;
@@ -1126,7 +1046,7 @@ index ff63e26..c756994 100644
          s.fill_ptrs();
          s.instance = {};
          s.instance.pszInstanceName = s.instance_name.data();
-@@ -162,6 +346,28 @@ struct MdnsService::Impl {
+@@ -162,6 +344,28 @@ struct MdnsService::Impl {
          }
          std::wstring local_host = std::wstring(host) + L".local";
  
@@ -1155,44 +1075,7 @@ index ff63e26..c756994 100644
          // Hex-encode the Ed25519 public key for the `pk` TXT value (64
          // chars for 32 bytes). iOS uses it to match the receiver
          // advertised over mDNS with the one it later pair-verifies.
-@@ -175,17 +381,26 @@ struct MdnsService::Impl {
-             }
-         }
- 
-+        // A screen-only receiver drops the audio feature and the AirPlay
-+        // speaker (_raop) service, so senders keep their own sound output.
-+        const bool audio = !ctx.live || ctx.live->receive_audio.load(std::memory_order_relaxed);
-+        const std::string features = audio ? ctx.features : ap::airplay::features_without_audio(ctx.features);
-+
-         // ---- _airplay._tcp --------------------------------------------------
-         airplay->host_name     = local_host;
-         airplay->instance_name = widen(ctx.name) + L"._airplay._tcp.local";
-         airplay->keys          = { L"deviceid", L"features", L"flags", L"model",
-                                   L"pi", L"pk", L"pw", L"srcvers", L"vv" };
--        airplay->values        = { widen(ctx.deviceid), widen(ctx.features),
-+        airplay->values        = { widen(ctx.deviceid), widen(features),
-                                   L"0x4",             widen(ctx.model),
-                                   widen(ctx.pi),      pk_hex,
-                                   L"false",           widen(ctx.srcvers),
-                                   L"2" };
-         if (!register_service(airplay, port)) return false;
-+        if (!audio) {
-+            LOG_INFO << "mDNS: audio reception off; AirPlay speaker service not advertised";
-+            return true;
-+        }
- 
-         // ---- _raop._tcp -----------------------------------------------------
-         // Instance name: "<12-hex-of-deviceid>@<DeviceName>" (UxPlay convention).
-@@ -201,7 +416,7 @@ struct MdnsService::Impl {
-                                L"tp",      L"vn",  L"vs",  L"vv" };
-         raop->values        = { L"1",                L"2",
-                                L"0,1,2,3",          L"true",
--                               L"0,3,5",            widen(ctx.features),
-+                               L"0,3,5",            widen(features),
-                                L"0,1,2",            widen(ctx.model),
-                                L"5.6.0.0",          pk_hex,
-                                L"false",            L"0x4",
-@@ -219,6 +434,7 @@ struct MdnsService::Impl {
+@@ -219,6 +423,7 @@ struct MdnsService::Impl {
      void stop() {
          unregister_service(airplay);
          unregister_service(raop);
@@ -1200,7 +1083,7 @@ index ff63e26..c756994 100644
      }
  };
  
-@@ -415,4 +631,12 @@ void MdnsService::stop() {
+@@ -415,4 +620,12 @@ void MdnsService::stop() {
      if (impl_) impl_->stop();
  }
  
@@ -1638,7 +1521,7 @@ index 296a3f0..719e241 100644
          if (!mutex_) return Result::Error;
          if (error != ERROR_ALREADY_EXISTS) return Result::Primary;
 diff --git a/src/settings.cpp b/src/settings.cpp
-index 82017ab..fe7eca8 100644
+index 82017ab..6f834b0 100644
 --- a/src/settings.cpp
 +++ b/src/settings.cpp
 @@ -15,6 +15,17 @@ namespace ap {
@@ -1681,7 +1564,7 @@ index 82017ab..fe7eca8 100644
                  const int n = std::stoi(val);
                  if (n >= -1 && n <= 3) s.video_rotation = n;
              }
-+            else if (key == "receive_audio") s.receive_audio = std::stoi(val) != 0;
++            else if (key == "play_audio") s.play_audio = std::stoi(val) != 0;
 +            else if (key == "output_volume") {
 +                const int n = std::stoi(val);
 +                if (n >= 0 && n <= 100) s.output_volume = n;
@@ -1709,7 +1592,7 @@ index 82017ab..fe7eca8 100644
          << "fullscreen="     << s.fullscreen     << '\n'
          << "chromeless="     << s.chromeless     << '\n'
          << "video_rotation=" << s.video_rotation << '\n'
-+        << "receive_audio=" << s.receive_audio << '\n'
++        << "play_audio=" << s.play_audio << '\n'
 +        << "output_volume=" << s.output_volume << '\n'
 +        << "output_muted=" << s.output_muted << '\n'
          << "diagnostics=" << s.ui.diagnostics << '\n'
@@ -1730,14 +1613,14 @@ index 82017ab..fe7eca8 100644
      s.fullscreen     = live.fullscreen.load(std::memory_order_relaxed);
      s.chromeless     = live.chromeless.load(std::memory_order_relaxed);
      s.video_rotation = live.video_rotation.load(std::memory_order_relaxed);
-+    s.receive_audio  = live.receive_audio.load(std::memory_order_relaxed);
++    s.play_audio  = live.play_audio.load(std::memory_order_relaxed);
 +    s.output_volume  = live.output_volume.load(std::memory_order_relaxed);
 +    s.output_muted   = live.output_muted.load(std::memory_order_relaxed);
      s.ui = live.ui_preferences();
      return s;
  }
 diff --git a/src/settings.h b/src/settings.h
-index 5aa6783..bb61488 100644
+index 5aa6783..02ada66 100644
 --- a/src/settings.h
 +++ b/src/settings.h
 @@ -18,19 +18,22 @@ struct UiPreferences {
@@ -1770,9 +1653,9 @@ index 5aa6783..bb61488 100644
      bool fullscreen     = false;
      bool chromeless     = false;
      int video_rotation  = -1; // -1: follow stream; 0..3: clockwise quarter turns
-+    // Off: present as a screen-only receiver so the sender keeps its own
-+    // sound output (for example AirPods) instead of switching to this PC.
-+    bool receive_audio  = false;
++    // Local playback only. The receiver always advertises audio: macOS times
++    // out and drops a screen mirroring session whose receiver lacks it.
++    bool play_audio     = true;
 +    int  output_volume  = 100; // 0..100, applied on top of the sender's volume
 +    bool output_muted   = false;
      UiPreferences ui;
@@ -1781,11 +1664,11 @@ index 5aa6783..bb61488 100644
          return std::tie(receiver_name, mirror_width, mirror_height, hevc_enabled, max_fps,
 -                        refresh_rate, mirror_hwaccel, vsync_enabled, fullscreen, chromeless, video_rotation, ui) ==
 +                        refresh_rate, mirror_hwaccel, vsync_enabled, fullscreen, chromeless, video_rotation,
-+                        receive_audio, output_volume, output_muted, ui) ==
++                        play_audio, output_volume, output_muted, ui) ==
                 std::tie(other.receiver_name, other.mirror_width, other.mirror_height, other.hevc_enabled, other.max_fps,
 -                        other.refresh_rate, other.mirror_hwaccel, other.vsync_enabled, other.fullscreen, other.chromeless, other.video_rotation, other.ui);
 +                        other.refresh_rate, other.mirror_hwaccel, other.vsync_enabled, other.fullscreen, other.chromeless, other.video_rotation,
-+                        other.receive_audio, other.output_volume, other.output_muted, other.ui);
++                        other.play_audio, other.output_volume, other.output_muted, other.ui);
      }
  };
  
@@ -1989,7 +1872,7 @@ index 2e6ca89..60eb361 100644
  
      void submit(const AVFrame* frame);
 diff --git a/src/video/video_renderer.cpp b/src/video/video_renderer.cpp
-index 426a93a..9eafa73 100644
+index 426a93a..27b5234 100644
 --- a/src/video/video_renderer.cpp
 +++ b/src/video/video_renderer.cpp
 @@ -5,6 +5,9 @@
@@ -2252,7 +2135,7 @@ index 426a93a..9eafa73 100644
          live_settings_->mirror_hwaccel.store(defaults.mirror_hwaccel);
          live_settings_->vsync_enabled.store(defaults.vsync_enabled);
          live_settings_->video_rotation.store(defaults.video_rotation);
-+        live_settings_->receive_audio.store(defaults.receive_audio);
++        live_settings_->play_audio.store(defaults.play_audio);
 +        live_settings_->output_volume.store(defaults.output_volume);
 +        live_settings_->output_muted.store(defaults.output_muted);
          live_settings_->fullscreen.store(defaults.fullscreen);
@@ -2711,7 +2594,7 @@ index 426a93a..9eafa73 100644
                  ImGui::PopStyleColor();
                  ImGui::Separator();
                  // Wrap descriptive text to the panel width so long
-@@ -1986,32 +2142,68 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1986,32 +2142,69 @@ void VideoRenderer::run(const std::string& title) {
                  auto settings_section = [&](const char* label, ImGuiTreeNodeFlags flags = 0) {
                      ImGui::PushFont(bold_font);
                      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
@@ -2768,13 +2651,14 @@ index 426a93a..9eafa73 100644
 +                        ImGui::TextDisabled("%s",tr("Shown in AirPlay on your devices. Saved automatically."));
 +                }
 +                if (live_settings_ && settings_section("Sound", ImGuiTreeNodeFlags_DefaultOpen)) {
-+                    bool receive = live_settings_->receive_audio.load();
-+                    if (ImGui::Checkbox(label_id("Receive sound from devices", "receive_audio").c_str(), &receive))
-+                        live_settings_->receive_audio.store(receive);
-+                    ImGui::TextDisabled("%s", tr(receive
-+                        ? "On: when a device connects, its sound plays on this PC."
-+                        : "Off: devices keep their own sound output, such as AirPods. Takes effect on the next connection."));
-+                    ImGui::BeginDisabled(!receive);
++                    bool play = live_settings_->play_audio.load();
++                    if (ImGui::Checkbox(label_id("Play sound on this PC", "play_audio").c_str(), &play))
++                        live_settings_->play_audio.store(play);
++                    ImGui::TextDisabled("%s", tr(play
++                        ? "Sound sent by the device plays on this PC."
++                        : "Sound sent by the device is not played on this PC."));
++                    ImGui::TextDisabled("%s", tr("A Mac moves its sound output here while mirroring. To keep listening on the Mac, for example with AirPods, choose that output in the Mac's Sound menu."));
++                    ImGui::BeginDisabled(!play);
 +                    int volume = live_settings_->output_volume.load();
 +                    ImGui::SetNextItemWidth(-1.0f);
 +                    if (ImGui::SliderInt("##output_volume", &volume, 0, 100, tr("Volume %d%%")))
@@ -2787,7 +2671,7 @@ index 426a93a..9eafa73 100644
                  }
                  if (settings_section("Mirror resolution",
                          ImGuiTreeNodeFlags_DefaultOpen)) {
-@@ -2047,10 +2239,10 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2047,10 +2240,10 @@ void VideoRenderer::run(const std::string& title) {
                          const char* preview;
                          if (custom_resolution) {
                              std::snprintf(preview_buf, sizeof(preview_buf),
@@ -2800,7 +2684,7 @@ index 426a93a..9eafa73 100644
                          }
  
                          ImGui::SetNextItemWidth(-1);
-@@ -2058,7 +2250,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2058,7 +2251,7 @@ void VideoRenderer::run(const std::string& title) {
                              for (int i = 0; i < (int)IM_ARRAYSIZE(presets); ++i) {
                                  const bool is_sel =
                                      (!custom_resolution && sel == i);
@@ -2809,7 +2693,7 @@ index 426a93a..9eafa73 100644
                                                        is_sel)) {
                                      custom_resolution = false;
                                      live_settings_->mirror_width.store(presets[i].w);
-@@ -2067,7 +2259,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2067,7 +2260,7 @@ void VideoRenderer::run(const std::string& title) {
                                  if (is_sel) ImGui::SetItemDefaultFocus();
                              }
                              ImGui::Separator();
@@ -2818,7 +2702,7 @@ index 426a93a..9eafa73 100644
                                  custom_resolution = true;
                              }
                              ImGui::EndCombo();
-@@ -2088,12 +2280,12 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2088,12 +2281,12 @@ void VideoRenderer::run(const std::string& title) {
                              if (!height_active) height_buf = cur_h;
  
                              ImGui::SetNextItemWidth(80);
@@ -2833,7 +2717,7 @@ index 426a93a..9eafa73 100644
                                              &height_buf, 0, 0);
                              height_active = ImGui::IsItemActive();
  
-@@ -2105,59 +2297,59 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2105,59 +2298,59 @@ void VideoRenderer::run(const std::string& title) {
                                  height_buf != cur_h) {
                                  live_settings_->mirror_height.store(height_buf);
                              }
@@ -2912,7 +2796,7 @@ index 426a93a..9eafa73 100644
                          std::string selected_folder;
                          if (browse_recording_folder(
                                  window, recording_dir.data(), selected_folder)) {
-@@ -2168,79 +2360,81 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2168,79 +2361,81 @@ void VideoRenderer::run(const std::string& title) {
                      }
  #endif
                      const char* encoder_modes[] = {
@@ -3020,7 +2904,7 @@ index 426a93a..9eafa73 100644
                      }
                  }
                  if (settings_section("Frame rate")) {
-@@ -2252,54 +2446,54 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2252,54 +2447,54 @@ void VideoRenderer::run(const std::string& title) {
                          // keep the underlying fields in lockstep.
                          int cap = live_settings_->max_fps.load();
                          ImGui::SetNextItemWidth(200);
@@ -3095,7 +2979,7 @@ index 426a93a..9eafa73 100644
                  ImGui::PopTextWrapPos();
              }
              ImGui::EndChild();
-@@ -2340,25 +2534,25 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2340,25 +2535,25 @@ void VideoRenderer::run(const std::string& title) {
              // "Streaming" = paired AND frames flowing; "Connected" =
              // paired but iOS quiet (static menu, paused video — common
              // in mirror); "Idle" = nothing connected.
@@ -3129,7 +3013,7 @@ index 426a93a..9eafa73 100644
              sep();
              const float    mbps  =
                  payload_mbps_ema_.load(std::memory_order_relaxed);
-@@ -2382,17 +2576,17 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2382,17 +2577,17 @@ void VideoRenderer::run(const std::string& title) {
                  }
                  return std::string(buf);
              };
@@ -3151,7 +3035,7 @@ index 426a93a..9eafa73 100644
              ImGui::EndTable();
              }
          }
-@@ -2410,7 +2604,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2410,7 +2605,7 @@ void VideoRenderer::run(const std::string& title) {
              const float controls_y = wide ? std::max(90.0f, (stage_h - std::min(300.0f, stage_h * .40f)) * .42f) + 180 : stage_h - controls_h;
              ImGui::SetNextWindowPos(ImVec2(stage_x + controls_x, stage_y + controls_y));
              ImGui::SetNextWindowSize(ImVec2(stage_w - controls_x - 20, controls_h));
@@ -3160,7 +3044,7 @@ index 426a93a..9eafa73 100644
              ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 8));
              if (ImGui::Begin("##audio_controls", nullptr, kPanelFlags | ImGuiWindowFlags_NoScrollbar)) {
                  draw_audio_controls();
-@@ -2455,6 +2649,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2455,6 +2650,7 @@ void VideoRenderer::run(const std::string& title) {
              }
          }
  
@@ -3168,7 +3052,7 @@ index 426a93a..9eafa73 100644
          publish_preferences();
          ImGui::Render();
          ImGui_ImplSDLRenderer2_RenderDrawData(
-@@ -2500,6 +2695,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2500,6 +2696,7 @@ void VideoRenderer::run(const std::string& title) {
      ImGui_ImplSDLRenderer2_Shutdown();
      ImGui_ImplSDL2_Shutdown();
      ImGui::DestroyContext();
@@ -3246,7 +3130,7 @@ index 6250674..92a078f 100644
      } catch (const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
  }
 diff --git a/tools/test_settings.cpp b/tools/test_settings.cpp
-index 6e164e8..c3bee48 100644
+index 6e164e8..61a849e 100644
 --- a/tools/test_settings.cpp
 +++ b/tools/test_settings.cpp
 @@ -15,7 +15,12 @@ int main() {
@@ -3254,9 +3138,9 @@ index 6e164e8..c3bee48 100644
          ap::PersistentSettings wanted;
          require(wanted.mirror_hwaccel, "GPU acceleration must be the default");
 -        wanted.receiver_name = "Living room";
-+        require(!wanted.receive_audio && wanted.output_volume == 100 && !wanted.output_muted,
-+                "audio reception must be off by default at full local volume");
-+        wanted.receive_audio = true;
++        require(wanted.play_audio && wanted.output_volume == 100 && !wanted.output_muted,
++                "local audio playback must be on by default at full volume");
++        wanted.play_audio = false;
 +        wanted.output_volume = 35;
 +        wanted.output_muted = true;
 +        wanted.receiver_name = u8"Eric 的工作室";
