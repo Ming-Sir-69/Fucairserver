@@ -1,4 +1,5 @@
 #include "custom_identity.h"
+#include "ui_text.h"
 #include <SDL.h>
 #ifdef _WIN32
 #include <SDL_syswm.h>
@@ -154,10 +155,11 @@ void show_menu(POINT anchor) {
     }
     const auto menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, menu_open, L"打开 Fucairserver");
-    AppendMenuW(menu, MF_STRING, menu_settings, L"设置");
+    const bool chinese = ui_chinese();
+    AppendMenuW(menu, MF_STRING, menu_open, chinese ? L"打开 Fucairserver" : L"Open Fucairserver");
+    AppendMenuW(menu, MF_STRING, menu_settings, chinese ? L"设置" : L"Settings");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, menu_exit, L"退出");
+    AppendMenuW(menu, MF_STRING, menu_exit, chinese ? L"退出" : L"Exit");
     SetMenuDefaultItem(menu, menu_open, FALSE);
     SetForegroundWindow(owner);
     const UINT selected = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,

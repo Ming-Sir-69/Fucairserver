@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index efb9bb1..1dd61f0 100644
+index efb9bb1..7433336 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -12,6 +12,9 @@ if(MSVC)
@@ -12,13 +12,15 @@ index efb9bb1..1dd61f0 100644
  
  # ---- libplist (required) ------------------------------------------------------
  # UxPlay uses libplist to serialise the /info, ANNOUNCE and other RTSP bodies.
-@@ -341,6 +344,22 @@ add_executable(airplay-windows
+@@ -341,6 +344,24 @@ add_executable(airplay-windows
  )
  
  target_include_directories(airplay-windows PRIVATE src)
 +set(FUCAIRSERVER_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Fucairserver source workspace")
 +target_include_directories(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src")
 +target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/windows_identity.cpp")
++target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/ime_text_input.cpp")
++target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/ui_text.cpp")
 +if(WIN32)
 +    enable_language(RC)
 +    target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc")
@@ -35,7 +37,7 @@ index efb9bb1..1dd61f0 100644
  target_link_libraries(airplay-windows PRIVATE OpenSSL::Crypto ${FFMPEG_TARGETS} ${SDL2_TARGET} ${SDL2_TTF_TARGET} imgui)
  if(_use_gst AND GSTREAMER_FOUND)
      target_link_libraries(airplay-windows PRIVATE PkgConfig::GSTREAMER)
-@@ -418,7 +437,7 @@ if(WIN32)
+@@ -418,7 +439,7 @@ if(WIN32)
      # VideoRenderer window.
      target_link_libraries(airplay-windows PRIVATE
          ws2_32 iphlpapi dnsapi dwmapi d3d11
@@ -44,7 +46,7 @@ index efb9bb1..1dd61f0 100644
  
      # Released as a GUI app so no empty console window pops up when
      # launched from File Explorer. main() stays the entry point — the
-@@ -457,7 +476,7 @@ endif()
+@@ -457,7 +478,7 @@ endif()
  # system GStreamer install put them and let gst_init() find them via
  # its registered plugin path — practically: as long as the user has
  # GStreamer's bin/ on PATH the plugins resolve at startup.
@@ -53,7 +55,17 @@ index efb9bb1..1dd61f0 100644
      add_custom_command(TARGET airplay-windows POST_BUILD
          COMMAND ${CMAKE_COMMAND} -E copy_if_different
              $<TARGET_RUNTIME_DLLS:airplay-windows>
-@@ -488,7 +507,7 @@ if(BUILD_NETWORK_TESTS)
+@@ -485,10 +506,17 @@ endif()
+ # Focused regression tests for receiver disconnect and shutdown.
+ option(BUILD_NETWORK_TESTS "Build socket shutdown regression tests" OFF)
+ if(BUILD_NETWORK_TESTS)
++    add_executable(test-ime-input "${FUCAIRSERVER_PROJECT_ROOT}/src/tests/ime_text_input.cpp"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/ime_text_input.cpp")
++    target_include_directories(test-ime-input PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src")
++    target_link_libraries(test-ime-input PRIVATE imgui ${SDL2_TARGET})
++    add_executable(test-ui-text "${FUCAIRSERVER_PROJECT_ROOT}/src/tests/ui_text.cpp"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/ui_text.cpp")
++    target_include_directories(test-ui-text PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src")
      add_executable(test-firewall tools/test_firewall.cpp src/platform/firewall.cpp)
      target_include_directories(test-firewall PRIVATE src)
      if(WIN32)
@@ -62,6 +74,147 @@ index efb9bb1..1dd61f0 100644
      endif()
      add_executable(test-settings tools/test_settings.cpp src/settings.cpp src/log.cpp)
      target_include_directories(test-settings PRIVATE src)
+@@ -515,6 +543,8 @@ if(BUILD_NETWORK_TESTS)
+         target_link_libraries(test-shutdown PRIVATE Threads::Threads)
+     endif()
+     enable_testing()
++    add_test(NAME ime-input COMMAND test-ime-input)
++    add_test(NAME ui-text COMMAND test-ui-text)
+     add_test(NAME firewall COMMAND test-firewall)
+     add_test(NAME settings COMMAND test-settings)
+     add_test(NAME socket-shutdown COMMAND test-shutdown)
+diff --git a/src/airplay/mirror_listener.cpp b/src/airplay/mirror_listener.cpp
+index f058762..4c4ff34 100644
+--- a/src/airplay/mirror_listener.cpp
++++ b/src/airplay/mirror_listener.cpp
+@@ -30,7 +30,7 @@ namespace {
+ 
+ constexpr int kHeaderSize       = 128;
+ constexpr int kMaxPayloadSize   = 2'000'000;   // generous bound vs RAOP_PACKET_LEN (32 KB)
+-constexpr auto kRecvTimeoutMs   = 200;         // per-recv timeout; loops check running_
++constexpr int kRecvTimeoutMs    = 200;         // readiness wait; loops check running_
+ 
+ enum : uint16_t {
+     kFrameVideoNonIdr   = 0x0000,
+@@ -163,39 +163,26 @@ uint64_t get_u64_le(const unsigned char* b, int off) {
+     return v;
+ }
+ 
+-void set_recv_timeout(socket_t s, int ms) {
+-#if defined(_WIN32)
+-    DWORD timeout = static_cast<DWORD>(ms);
+-    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+-                 reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+-#else
+-    timeval tv;
+-    tv.tv_sec  = ms / 1000;
+-    tv.tv_usec = (ms % 1000) * 1000;
+-    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+-#endif
+-}
+-
+-bool was_timeout() {
+-#if defined(_WIN32)
+-    return WSAGetLastError() == WSAETIMEDOUT;
+-#else
+-    return errno == EAGAIN || errno == EWOULDBLOCK;
+-#endif
+-}
+-
+ // Returns len on success, 0 on peer close, -1 on real error.
+-// Honours running_ flag by checking between recv calls (SO_RCVTIMEO caps each
+-// individual recv at kRecvTimeoutMs).
++// Waits for readability in kRecvTimeoutMs slices so running_ is honoured.
++// A timed-out Winsock SO_RCVTIMEO recv leaves the connection in an
++// indeterminate state, and a static extended desktop sends no frames for
++// long stretches, so never let recv itself time out.
+ template <typename RunningFn>
+ int recv_exact(socket_t s, unsigned char* buf, int len, RunningFn running) {
+     int got = 0;
+     while (got < len) {
+         if (!running()) return -1;
++        fd_set readable;
++        FD_ZERO(&readable);
++        FD_SET(s, &readable);
++        timeval wait{0, kRecvTimeoutMs * 1000};
++        const int ready = ::select(static_cast<int>(s) + 1, &readable, nullptr, nullptr, &wait);
++        if (ready == 0) continue;
++        if (ready < 0) return -1;
+         int n = ::recv(s, reinterpret_cast<char*>(buf + got), len - got, 0);
+         if (n > 0) { got += n; continue; }
+         if (n == 0) return 0;                 // peer closed
+-        if (was_timeout() && running()) continue;
+         return -1;                             // real error, or stop requested
+     }
+     return got;
+@@ -376,8 +363,6 @@ void MirrorListener::accept_loop() {
+         }
+         LOG_INFO << "mirror: iOS connected from " << ip << ':' << peer_port;
+ 
+-        set_recv_timeout(client, kRecvTimeoutMs);
+-
+         reader_loop(client);
+ 
+         {
+diff --git a/src/airplay/rtsp_parser.cpp b/src/airplay/rtsp_parser.cpp
+index b99e222..00a9079 100644
+--- a/src/airplay/rtsp_parser.cpp
++++ b/src/airplay/rtsp_parser.cpp
+@@ -31,10 +31,16 @@ std::string Request::header(const std::string& key) const {
+ }
+ 
+ std::size_t Request::content_length() const {
+-    auto v = header("content-length");
+-    if (v.empty()) return 0;
+-    try { return static_cast<std::size_t>(std::stoul(v)); }
+-    catch (...) { return 0; }
++    // Digits only: stoul would accept "-1" as a huge length. Anything that
++    // is not a plain decimal at or below the limit is reported as oversized.
++    const auto v = header("content-length");
++    std::size_t n = 0;
++    for (char c : v) {
++        if (c < '0' || c > '9') return kMaxBodySize + 1;
++        n = n * 10 + static_cast<std::size_t>(c - '0');
++        if (n > kMaxBodySize) return kMaxBodySize + 1;
++    }
++    return n;
+ }
+ 
+ void Response::set_header(std::string key, std::string value) {
+@@ -127,6 +133,11 @@ bool RequestReader::read(socket_t fd, Request& out) {
+     if (!read_headers(fd, out, body_offset)) return false;
+ 
+     std::size_t clen = out.content_length();
++    if (clen > kMaxBodySize) {
++        // A LAN peer must not make us buffer an unbounded body.
++        LOG_WARN << "request body too large or malformed Content-Length, dropping connection";
++        return false;
++    }
+     std::size_t need = body_offset + clen;
+     if (buffer_.size() < need) {
+         if (!fill(fd, need)) return false;
+diff --git a/src/airplay/rtsp_parser.h b/src/airplay/rtsp_parser.h
+index 883c1d5..d3244f8 100644
+--- a/src/airplay/rtsp_parser.h
++++ b/src/airplay/rtsp_parser.h
+@@ -9,6 +9,9 @@
+ 
+ namespace ap::airplay {
+ 
++// Largest accepted request body. Cover art and setup plists are far smaller.
++constexpr std::size_t kMaxBodySize = 8u * 1024 * 1024;
++
+ // AirPlay uses an RTSP-like framing: request line, headers, optional body.
+ // Both HTTP/1.1 and RTSP/1.0 request lines are seen in the wild — we accept
+ // both. Requests use CRLF line endings; Content-Length drives body size.
+@@ -20,6 +23,7 @@ struct Request {
+     std::vector<unsigned char> body;
+ 
+     std::string header(const std::string& key) const;  // "" if missing
++    // Returns kMaxBodySize + 1 for an oversized or malformed value.
+     std::size_t content_length() const;
+ };
+ 
 diff --git a/src/audio/audio_receiver.cpp b/src/audio/audio_receiver.cpp
 index 112324a..b1c7db1 100644
 --- a/src/audio/audio_receiver.cpp
@@ -188,7 +341,7 @@ index 414eda3..213ec1d 100644
  
  namespace ap::crypto {
 diff --git a/src/main.cpp b/src/main.cpp
-index 71c0f07..d3ae85d 100644
+index 71c0f07..08c51e5 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -1,4 +1,5 @@
@@ -575,20 +728,237 @@ index 71c0f07..d3ae85d 100644
      // Keep the render thread available while workers finish GPU/audio teardown.
      std::atomic<bool> disconnect_requested{false};
      renderer.set_disconnect_handler([&disconnect_requested]() {
-@@ -342,7 +507,7 @@ int main(int argc, char** argv) {
+@@ -342,11 +507,27 @@ int main(int argc, char** argv) {
      auto last_saved_settings = ap::snapshot(live_settings);
      auto observed_settings = last_saved_settings;
      auto settings_changed_at = std::chrono::steady_clock::now();
 -    while (!g_stop && !renderer.user_closed()) {
++    auto lan_checked_at = std::chrono::steady_clock::now();
 +    while (!g_stop && !renderer.user_closed() && !fucairserver::tray_exit_requested()) {
  #if defined(_WIN32)
          if (instance.activation_requested()) renderer.request_show();
  #endif
+         const auto receiver_name = live_settings.receiver_name();
++        bool readvertise = false;
++        if (std::chrono::steady_clock::now() - lan_checked_at >= std::chrono::seconds(10)) {
++            lan_checked_at = std::chrono::steady_clock::now();
++            std::string lan_ipv4 = ap::net::primary_ipv4();
++            if (lan_ipv4 == "0.0.0.0") lan_ipv4.clear();
++            if (lan_ipv4 != mdns.advertised_ipv4()) {
++                LOG_INFO << "LAN IPv4 changed to '" << lan_ipv4 << "'; refreshing mDNS";
++                readvertise = true;
++            }
++        }
++        if (readvertise && receiver_name == ctx.name) {
++            mdns.stop();
++            if (!mdns.start(ctx, server.port()))
++                LOG_WARN << "Could not advertise the receiver after a network change";
++        }
+         if (receiver_name != ctx.name) {
+             mdns.stop();
+             ctx.name = receiver_name;
 diff --git a/src/mdns/mdns_service.cpp b/src/mdns/mdns_service.cpp
-index ff63e26..28fc805 100644
+index ff63e26..0523e1c 100644
 --- a/src/mdns/mdns_service.cpp
 +++ b/src/mdns/mdns_service.cpp
-@@ -96,6 +96,11 @@ struct MdnsService::Impl {
+@@ -1,5 +1,6 @@
+ #include "mdns/mdns_service.h"
+ #include "log.h"
++#include "net/socket.h"
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -42,6 +43,180 @@ std::string narrow(PCWSTR ws) {
+     return out;
+ }
+ 
++// DnsServiceRegister accepts ip4Address for a custom host but does not
++// publish an A record for it, so that host would never resolve. Answer A
++// queries for the receiver-owned host here, alongside the system responder
++// (which keeps serving PTR/SRV/TXT and ignores this name).
++class HostResponder {
++public:
++    ~HostResponder() { stop(); }
++
++    bool start(const std::string& host, IN_ADDR lan) {
++        stop();
++        labels_.clear();
++        std::size_t begin = 0;
++        while (begin < host.size()) {
++            const auto dot = host.find('.', begin);
++            const auto end = dot == std::string::npos ? host.size() : dot;
++            if (end > begin) labels_.push_back(host.substr(begin, end - begin));
++            begin = end + 1;
++        }
++        lan_ = lan;
++        sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++        if (sock_ == INVALID_SOCKET) return false;
++        const BOOL on = TRUE;
++        ::setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof(on));
++        sockaddr_in any{};
++        any.sin_family = AF_INET;
++        any.sin_port = htons(5353);
++        any.sin_addr.s_addr = htonl(INADDR_ANY);
++        ip_mreq group{};
++        inet_pton(AF_INET, "224.0.0.251", &group.imr_multiaddr);
++        group.imr_interface = lan;
++        const DWORD ttl = 255;
++        if (::bind(sock_, reinterpret_cast<sockaddr*>(&any), sizeof(any)) != 0 ||
++            ::setsockopt(sock_, IPPROTO_IP, IP_ADD_MEMBERSHIP,
++                         reinterpret_cast<const char*>(&group), sizeof(group)) != 0 ||
++            ::setsockopt(sock_, IPPROTO_IP, IP_MULTICAST_IF,
++                         reinterpret_cast<const char*>(&lan), sizeof(lan)) != 0) {
++            LOG_WARN << "mDNS host responder unavailable: " << WSAGetLastError();
++            ::closesocket(sock_);
++            sock_ = INVALID_SOCKET;
++            return false;
++        }
++        ::setsockopt(sock_, IPPROTO_IP, IP_MULTICAST_TTL, reinterpret_cast<const char*>(&ttl), sizeof(ttl));
++        running_ = true;
++        thread_ = std::thread([this] { run(); });
++        return true;
++    }
++
++    void stop() {
++        if (!running_.exchange(false)) return;
++        if (thread_.joinable()) thread_.join();
++        ::closesocket(sock_);
++        sock_ = INVALID_SOCKET;
++    }
++
++private:
++    static std::string lower(std::string s) {
++        for (auto& c : s) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
++        return s;
++    }
++
++    // Reads a possibly compressed name; returns false on malformed input.
++    static bool read_name(const unsigned char* p, int len, int& off, std::vector<std::string>& out) {
++        int pos = off, jumps = 0;
++        bool jumped = false;
++        while (true) {
++            if (pos >= len) return false;
++            const int n = p[pos];
++            if (n == 0) { if (!jumped) off = pos + 1; return true; }
++            if ((n & 0xc0) == 0xc0) {
++                if (pos + 1 >= len || ++jumps > 16) return false;
++                if (!jumped) off = pos + 2;
++                pos = ((n & 0x3f) << 8) | p[pos + 1];
++                jumped = true;
++                continue;
++            }
++            if (pos + 1 + n > len) return false;
++            out.emplace_back(reinterpret_cast<const char*>(p + pos + 1), n);
++            pos += n + 1;
++        }
++    }
++
++    bool is_host(const std::vector<std::string>& name) const {
++        if (name.size() != labels_.size()) return false;
++        for (std::size_t i = 0; i < name.size(); ++i)
++            if (lower(name[i]) != lower(labels_[i])) return false;
++        return true;
++    }
++
++    void append_name(std::vector<unsigned char>& out) const {
++        for (const auto& label : labels_) {
++            out.push_back(static_cast<unsigned char>(label.size()));
++            out.insert(out.end(), label.begin(), label.end());
++        }
++        out.push_back(0);
++    }
++
++    // Legacy unicast queries (source port != 5353) get the question echoed
++    // and no cache-flush bit, per RFC 6762 section 6.7.
++    std::vector<unsigned char> response(uint16_t id, bool legacy) const {
++        std::vector<unsigned char> out = {
++            static_cast<unsigned char>(id >> 8), static_cast<unsigned char>(id), 0x84, 0x00,
++            0, static_cast<unsigned char>(legacy ? 1 : 0), 0, 1, 0, 0, 0, 0};
++        if (legacy) {
++            append_name(out);
++            out.insert(out.end(), {0, 1, 0, 1});
++        }
++        append_name(out);
++        const unsigned char ttl = legacy ? 10 : 120;
++        out.insert(out.end(), {0, 1, static_cast<unsigned char>(legacy ? 0x00 : 0x80), 1,
++                               0, 0, 0, ttl, 0, 4});
++        const auto* ip = reinterpret_cast<const unsigned char*>(&lan_.s_addr);
++        out.insert(out.end(), ip, ip + 4);
++        return out;
++    }
++
++    void send_multicast(const std::vector<unsigned char>& packet) {
++        sockaddr_in group{};
++        group.sin_family = AF_INET;
++        group.sin_port = htons(5353);
++        inet_pton(AF_INET, "224.0.0.251", &group.sin_addr);
++        ::sendto(sock_, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
++                 reinterpret_cast<sockaddr*>(&group), sizeof(group));
++    }
++
++    void run() {
++        // Announce twice so caches drop any address learned for this host.
++        auto next_announce = std::chrono::steady_clock::now();
++        int announcements = 0;
++        unsigned char buf[1500];
++        while (running_) {
++            if (announcements < 2 && std::chrono::steady_clock::now() >= next_announce) {
++                send_multicast(response(0, false));
++                ++announcements;
++                next_announce = std::chrono::steady_clock::now() + std::chrono::seconds(1);
++            }
++            fd_set readable;
++            FD_ZERO(&readable);
++            FD_SET(sock_, &readable);
++            timeval wait{0, 200000};
++            if (::select(0, &readable, nullptr, nullptr, &wait) <= 0) continue;
++            sockaddr_in from{};
++            int from_len = sizeof(from);
++            const int n = ::recvfrom(sock_, reinterpret_cast<char*>(buf), sizeof(buf), 0,
++                                     reinterpret_cast<sockaddr*>(&from), &from_len);
++            if (n < 12 || (buf[2] & 0x80)) continue;  // short packet or a response
++            const uint16_t id = static_cast<uint16_t>((buf[0] << 8) | buf[1]);
++            const int questions = (buf[4] << 8) | buf[5];
++            int off = 12;
++            bool asked = false, unicast = false;
++            for (int q = 0; q < questions; ++q) {
++                std::vector<std::string> name;
++                if (!read_name(buf, n, off, name) || off + 4 > n) break;
++                const int type = (buf[off] << 8) | buf[off + 1];
++                const bool qu = (buf[off + 2] & 0x80) != 0;
++                off += 4;
++                if ((type == 1 || type == 255) && is_host(name)) { asked = true; unicast |= qu; }
++            }
++            if (!asked) continue;
++            const bool legacy = ntohs(from.sin_port) != 5353;
++            const auto packet = response(legacy ? id : 0, legacy);
++            if (legacy || unicast)
++                ::sendto(sock_, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
++                         reinterpret_cast<sockaddr*>(&from), from_len);
++            if (!legacy) send_multicast(packet);
++        }
++    }
++
++    std::vector<std::string> labels_;
++    IN_ADDR lan_{};
++    SOCKET sock_{INVALID_SOCKET};
++    std::atomic<bool> running_{false};
++    std::thread thread_;
++};
++
+ } // namespace
+ 
+ // One registered service (either _airplay._tcp or _raop._tcp). Owns the
+@@ -75,6 +250,8 @@ struct RegisteredService {
+ struct MdnsService::Impl {
+     std::shared_ptr<RegisteredService> airplay = std::make_shared<RegisteredService>();
+     std::shared_ptr<RegisteredService> raop = std::make_shared<RegisteredService>();
++    std::string advertised_ipv4;
++    HostResponder host_responder;
+ 
+     static void WINAPI on_complete(DWORD status, PVOID context,
+                                    PDNS_SERVICE_INSTANCE inst) {
+@@ -96,6 +273,11 @@ struct MdnsService::Impl {
      bool register_service(const std::shared_ptr<RegisteredService>& service,
                            uint16_t port) {
          auto& s = *service;
@@ -600,6 +970,78 @@ index ff63e26..28fc805 100644
          s.fill_ptrs();
          s.instance = {};
          s.instance.pszInstanceName = s.instance_name.data();
+@@ -162,6 +344,28 @@ struct MdnsService::Impl {
+         }
+         std::wstring local_host = std::wstring(host) + L".local";
+ 
++        // The machine host name is answered with every local address,
++        // including ISP-delegated IPv6 prefixes that expire within minutes
++        // and virtual adapters. Senders prefer IPv6, so a long mirror
++        // session ends when the prefix is renewed or an RA is missed after
++        // a Wi-Fi roam. Publish a receiver-owned host bound to the routed
++        // LAN IPv4 address instead; fall back on IPv6-only networks or when
++        // the host responder cannot bind.
++        advertised_ipv4 = ap::net::primary_ipv4();
++        IN_ADDR lan{};
++        bool has_lan_ipv4 = advertised_ipv4 != "0.0.0.0" &&
++            inet_pton(AF_INET, advertised_ipv4.c_str(), &lan) == 1;
++        if (has_lan_ipv4) {
++            std::string suffix;
++            for (char c : ctx.deviceid) if (c != ':') suffix.push_back(c);
++            const std::string owned_host = "Fucairserver-" + suffix + ".local";
++            has_lan_ipv4 = host_responder.start(owned_host, lan);
++            if (has_lan_ipv4) local_host = widen(owned_host);
++        }
++        if (!has_lan_ipv4) advertised_ipv4.clear();
++        LOG_INFO << "mDNS host " << narrow(local_host.c_str())
++                 << (has_lan_ipv4 ? " A " + advertised_ipv4 : std::string(" (all addresses)"));
++
+         // Hex-encode the Ed25519 public key for the `pk` TXT value (64
+         // chars for 32 bytes). iOS uses it to match the receiver
+         // advertised over mDNS with the one it later pair-verifies.
+@@ -219,6 +423,7 @@ struct MdnsService::Impl {
+     void stop() {
+         unregister_service(airplay);
+         unregister_service(raop);
++        host_responder.stop();
+     }
+ };
+ 
+@@ -415,4 +620,12 @@ void MdnsService::stop() {
+     if (impl_) impl_->stop();
+ }
+ 
++std::string MdnsService::advertised_ipv4() const {
++#if defined(_WIN32)
++    return impl_ ? impl_->advertised_ipv4 : std::string{};
++#else
++    return {};
++#endif
++}
++
+ } // namespace ap::mdns
+diff --git a/src/mdns/mdns_service.h b/src/mdns/mdns_service.h
+index 1ec20f0..571d555 100644
+--- a/src/mdns/mdns_service.h
++++ b/src/mdns/mdns_service.h
+@@ -4,6 +4,7 @@
+ 
+ #include <cstdint>
+ #include <memory>
++#include <string>
+ 
+ namespace ap::mdns {
+ 
+@@ -22,6 +23,9 @@ public:
+ 
+     bool start(const ap::airplay::DeviceContext& ctx, uint16_t port);
+     void stop();
++    // LAN IPv4 bound to the advertised host, or empty when every local
++    // address is published (IPv6-only network or non-Windows build).
++    std::string advertised_ipv4() const;
+ 
+ private:
+     struct Impl;
 diff --git a/src/platform/firewall.cpp b/src/platform/firewall.cpp
 index 06350d0..63a95c2 100644
 --- a/src/platform/firewall.cpp
@@ -1003,7 +1445,7 @@ index 296a3f0..719e241 100644
          if (!mutex_) return Result::Error;
          if (error != ERROR_ALREADY_EXISTS) return Result::Primary;
 diff --git a/src/settings.cpp b/src/settings.cpp
-index 82017ab..3bdc9de 100644
+index 82017ab..42bd08e 100644
 --- a/src/settings.cpp
 +++ b/src/settings.cpp
 @@ -15,6 +15,17 @@ namespace ap {
@@ -1042,11 +1484,47 @@ index 82017ab..3bdc9de 100644
              }
              else if (key == "mirror_width") {
                  const int n = std::stoi(val);
+@@ -104,6 +115,10 @@ PersistentSettings load_settings(const std::filesystem::path& path) {
+                 const int n = std::stoi(val);
+                 if (n >= 2 && n <= 40) s.ui.recording_bitrate = n;
+             }
++            else if (key == "language") {
++                const int n = std::stoi(val);
++                if (n >= 0 && n <= 2) s.ui.language = n;
++            }
+         } catch (...) {
+             LOG_WARN << "settings: malformed value for " << key << "=" << val;
+         }
+@@ -151,7 +166,8 @@ bool save_settings(const PersistentSettings& s, const std::filesystem::path& pat
+         << "recording_directory=" << s.ui.recording_directory << '\n'
+         << "recording_codec=" << s.ui.recording_codec << '\n'
+         << "recording_encoder=" << s.ui.recording_encoder << '\n'
+-        << "recording_bitrate=" << s.ui.recording_bitrate << '\n';
++        << "recording_bitrate=" << s.ui.recording_bitrate << '\n'
++        << "language=" << s.ui.language << '\n';
+     out.close();
+     if (!out) {
+         LOG_WARN << "settings: could not finish writing " << temporary.u8string();
 diff --git a/src/settings.h b/src/settings.h
-index 5aa6783..381bfbe 100644
+index 5aa6783..9bed782 100644
 --- a/src/settings.h
 +++ b/src/settings.h
-@@ -30,7 +30,7 @@ struct UiPreferences {
+@@ -18,19 +18,20 @@ struct UiPreferences {
+     int recording_codec = 0;   // H.264 / H.265
+     int recording_encoder = 0; // Auto / GPU / CPU
+     int recording_bitrate = 8;
++    int language = 0;          // Follow system / Simplified Chinese / English
+ 
+     bool operator==(const UiPreferences& other) const {
+         return std::tie(diagnostics, window_placement_valid, window_x, window_y,
+                         window_width, window_height, window_maximized, recording_directory,
+-                        recording_codec, recording_encoder, recording_bitrate) ==
++                        recording_codec, recording_encoder, recording_bitrate, language) ==
+                std::tie(other.diagnostics, other.window_placement_valid, other.window_x, other.window_y,
+                         other.window_width, other.window_height, other.window_maximized, other.recording_directory,
+-                        other.recording_codec, other.recording_encoder, other.recording_bitrate);
++                        other.recording_codec, other.recording_encoder, other.recording_bitrate, other.language);
+     }
  };
  
  struct PersistentSettings {
@@ -1123,18 +1601,20 @@ index 2e6ca89..60eb361 100644
  
      void submit(const AVFrame* frame);
 diff --git a/src/video/video_renderer.cpp b/src/video/video_renderer.cpp
-index 426a93a..6956f6b 100644
+index 426a93a..3974ea7 100644
 --- a/src/video/video_renderer.cpp
 +++ b/src/video/video_renderer.cpp
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,9 @@
  #include "video/receiver_ui.h"
  #include "airplay/live_settings.h"
  #include "airplay/receiver_name.h"
 +#include "custom_identity.h"
++#include "ime_text_input.h"
++#include "ui_text.h"
  #include "log.h"
  #include "platform/single_instance.h"
  #include "platform/firewall.h"
-@@ -23,6 +24,8 @@
+@@ -23,6 +26,8 @@
  #include <cstdio>
  #include <cstring>
  #include <filesystem>
@@ -1143,7 +1623,30 @@ index 426a93a..6956f6b 100644
  #include <vector>
  
  #if defined(_WIN32)
-@@ -597,6 +600,8 @@ void VideoRenderer::record_payload_bytes(std::size_t n) {
+@@ -49,6 +54,13 @@ extern "C" {
+ namespace ap::video {
+ namespace {
+ 
++using fucairserver::tr;
++
++// ImGui keys widgets by label; keep the identity stable across languages.
++std::string label_id(const char* english, const char* id) {
++    return std::string(tr(english)) + "###" + id;
++}
++
+ // Keep the stage spacious; settings occupy a drawer only when requested.
+ constexpr int kDefaultWinWidth  = 1220;
+ constexpr int kDefaultWinHeight = 800;
+@@ -97,7 +109,7 @@ bool browse_recording_folder(SDL_Window* w, const std::string& initial,
+         dialog->GetOptions(&options);
+         dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                            FOS_PATHMUSTEXIST);
+-        dialog->SetTitle(L"Choose the recording folder");
++        dialog->SetTitle(fucairserver::ui_chinese() ? L"选择录制保存位置" : L"Choose the recording folder");
+ 
+         try {
+             const std::wstring initial_w =
+@@ -597,6 +609,8 @@ void VideoRenderer::record_payload_bytes(std::size_t n) {
  
  void VideoRenderer::set_active_device(DeviceInfo info) {
      std::lock_guard<std::mutex> lock(device_mtx_);
@@ -1152,7 +1655,36 @@ index 426a93a..6956f6b 100644
      device_     = std::move(info);
      has_device_ = true;
  }
-@@ -812,6 +817,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -743,6 +757,19 @@ void VideoRenderer::push_frame_nv12(const uint8_t* y,  int y_stride,
+ }
+ 
+ void VideoRenderer::run(const std::string& title) {
++#if defined(_WIN32) && defined(SDL_HINT_IME_SHOW_UI)
++    // SDL reads this when creating the native window. ImGui initializes its
++    // SDL backend later, so setting it there cannot enable the main window's
++    // native IME composition and candidate UI.
++    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
++#ifdef SDL_HINT_IME_INTERNAL_EDITING
++    // Receive preedit text so it can be drawn inside the active input field.
++    SDL_SetHint(SDL_HINT_IME_INTERNAL_EDITING, "0");
++#endif
++#ifdef SDL_HINT_IME_SUPPORT_EXTENDED_TEXT
++    SDL_SetHint(SDL_HINT_IME_SUPPORT_EXTENDED_TEXT, "1");
++#endif
++#endif
+     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+         LOG_ERROR << "SDL_Init failed: " << SDL_GetError();
+         running_ = false;
+@@ -761,6 +788,8 @@ void VideoRenderer::run(const std::string& title) {
+ #endif
+ 
+     auto preferences = live_settings_ ? live_settings_->ui_preferences() : ap::UiPreferences{};
++    int ui_language = preferences.language;
++    fucairserver::set_ui_language(static_cast<fucairserver::UiLanguage>(ui_language));
+     int initial_x = SDL_WINDOWPOS_CENTERED, initial_y = SDL_WINDOWPOS_CENTERED;
+     int initial_w = kDefaultWinWidth, initial_h = kDefaultWinHeight;
+     if (preferences.window_placement_valid) {
+@@ -812,6 +841,7 @@ void VideoRenderer::run(const std::string& title) {
          running_ = false;
          return;
      }
@@ -1160,7 +1692,7 @@ index 426a93a..6956f6b 100644
      LOG_INFO << "VideoRenderer window up (" << kDefaultWinWidth
               << 'x' << kDefaultWinHeight << ", resizable)";
      SDL_SetWindowMinimumSize(window, 960, 720);
-@@ -842,7 +848,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -842,7 +872,9 @@ void VideoRenderer::run(const std::string& title) {
      IMGUI_CHECKVERSION();
      ImGui::CreateContext();
      ImGuiIO& io = ImGui::GetIO();
@@ -1171,7 +1703,7 @@ index 426a93a..6956f6b 100644
      io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
      ImGui::StyleColorsDark();
      apply_overlay_theme();
-@@ -851,14 +859,44 @@ void VideoRenderer::run(const std::string& title) {
+@@ -851,14 +883,46 @@ void VideoRenderer::run(const std::string& title) {
      ImFont* small_font = nullptr;
      ImFont* page_font = nullptr;
      ImFont* receiver_font = nullptr;
@@ -1188,6 +1720,8 @@ index 426a93a..6956f6b 100644
 +        static const ImWchar punctuation[]={0x2000,0x206f,0x3000,0x303f,0xff00,0xffef,0};
 +        ranges.AddRanges(punctuation);
 +        if (live_settings_) ranges.AddText(live_settings_->receiver_name().c_str());
++        const std::string translated = fucairserver::translated_glyphs();
++        ranges.AddText(translated.c_str());
 +        ranges.BuildRanges(&cjk_ranges);
 +        io.Fonts->Flags|=ImFontAtlasFlags_NoPowerOfTwoHeight;
 +        io.Fonts->TexDesiredWidth=2048;
@@ -1222,7 +1756,7 @@ index 426a93a..6956f6b 100644
      }
  #endif
      if (!io.FontDefault) io.FontDefault = io.Fonts->AddFontDefault();
-@@ -867,6 +905,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -867,6 +931,9 @@ void VideoRenderer::run(const std::string& title) {
      if (!heading_font) heading_font = io.FontDefault;
      if (!page_font) page_font = bold_font;
      if (!receiver_font) receiver_font = bold_font;
@@ -1232,9 +1766,42 @@ index 426a93a..6956f6b 100644
      ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
      ImGui_ImplSDLRenderer2_Init(renderer);
  
-@@ -1118,6 +1159,18 @@ void VideoRenderer::run(const std::string& title) {
+@@ -973,6 +1040,7 @@ void VideoRenderer::run(const std::string& title) {
+     auto publish_preferences = [&]() {
+         auto current = preferences;
+         current.diagnostics = ui.diagnostics;
++        current.language = ui_language;
+         current.recording_directory = recording_dir.data();
+         current.recording_codec = static_cast<int>(recording_options.codec);
+         current.recording_encoder = static_cast<int>(recording_options.encoder);
+@@ -1009,6 +1077,14 @@ void VideoRenderer::run(const std::string& title) {
+     bool custom_resolution = false;
+     double settings_reset_notice_until = 0;
+ 
++    auto set_language = [&](int language) {
++        ui_language = language;
++        fucairserver::set_ui_language(static_cast<fucairserver::UiLanguage>(language));
++        // The idle caption is a pre-rendered texture.
++        std::lock_guard<std::mutex> lock(meta_mtx_);
++        idle_dirty_ = true;
++    };
++
+     auto reset_all_settings = [&]() {
+         if (!live_settings_) return;
+         const ap::PersistentSettings defaults;
+@@ -1036,6 +1112,7 @@ void VideoRenderer::run(const std::string& title) {
+         std::snprintf(recording_dir.data(),recording_dir.size(),"%s",default_recording_dir.c_str());
+         recording_options = VideoRecorder::Options{};
+         ui.diagnostics = defaults.ui.diagnostics;
++        set_language(defaults.ui.language);
+         ui.chromeless = false;
+         custom_resolution = false;
+         prev_chromeless = false;
+@@ -1117,7 +1194,20 @@ void VideoRenderer::run(const std::string& title) {
+     };
  
      ap::platform::FirewallMonitor firewall_monitor;
++    fucairserver::ImeTextInput ime;
      while (running_.load()) {
 +        if (fucairserver::consume_tray_settings_request()) {
 +            if (fullscreen) toggle_fullscreen();
@@ -1251,7 +1818,14 @@ index 426a93a..6956f6b 100644
          if (show_requested_.exchange(false)) {
              SDL_ShowWindow(window);
              if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
-@@ -1188,11 +1241,18 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1183,16 +1273,25 @@ void VideoRenderer::run(const std::string& title) {
+             }
+         }
+ 
++        ime.begin_events();
+         SDL_Event e;
+         while (SDL_PollEvent(&e)) {
++            if (ime.handle_event(e, SDL_GetWindowID(window))) continue;
              // Always feed ImGui first so focus / hover / capture work.
              ImGui_ImplSDL2_ProcessEvent(&e);
              if (e.type == SDL_QUIT) {
@@ -1270,7 +1844,7 @@ index 426a93a..6956f6b 100644
              const ImGuiIO& io_poll = ImGui::GetIO();
              // A focused panel captures navigation keys even when no field is
              // being edited. Keep receiver shortcuts global in that case;
-@@ -1208,10 +1268,11 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1208,10 +1307,11 @@ void VideoRenderer::run(const std::string& title) {
                  switch (e.key.keysym.sym) {
                      case SDLK_ESCAPE:
                          // ESC peels back layers in order:
@@ -1283,7 +1857,49 @@ index 426a93a..6956f6b 100644
                          else { closed_ = true; running_ = false; }
                          break;
                      case SDLK_f:
-@@ -1701,7 +1762,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1406,7 +1506,7 @@ void VideoRenderer::run(const std::string& title) {
+             make_text(fonts_small, t_idle_ip,
+                       SDL_Color{180, 180, 180, 255},
+                       idle_ip_tex,   idle_ip_w,   idle_ip_h);
+-            make_text(fonts_small, "Waiting for AirPlay",
++            make_text(fonts_small, tr("Waiting for AirPlay"),
+                       SDL_Color{150, 150, 150, 255},
+                       idle_msg_tex,  idle_msg_w,  idle_msg_h);
+         }
+@@ -1654,7 +1754,7 @@ void VideoRenderer::run(const std::string& title) {
+             draw->AddRectFilled(p,ImVec2(p.x+width,p.y+3),IM_COL32(225,229,223,255),2);
+             if (progress > 0) draw->AddRectFilled(p,ImVec2(p.x+width*progress,p.y+3),IM_COL32(87,106,89,255),2);
+             ImGui::Dummy(ImVec2(width,5));
+-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Playback position (read-only)");
++            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tr("Playback position (read-only)"));
+             ImGui::PushFont(small_font);
+             ImGui::TextDisabled("%u:%02u",static_cast<unsigned>(elapsed/60000),static_cast<unsigned>((elapsed/1000)%60));
+             char duration[32]; std::snprintf(duration,sizeof(duration),"%u:%02u",total/60000,(total/1000)%60);
+@@ -1668,17 +1768,17 @@ void VideoRenderer::run(const std::string& title) {
+             const ImVec2 row = ImGui::GetCursorPos();
+             ImGui::BeginDisabled(!ready || pending);
+             ImGui::SetCursorPos(ImVec2(row.x,row.y+10.5f));
+-            if (ui_draw::icon_button("##previous",ui_draw::Icon::Previous,"Previous track",32)) command(ap::airplay::MediaCommand::Previous);
++            if (ui_draw::icon_button("##previous",ui_draw::Icon::Previous,tr("Previous track"),32)) command(ap::airplay::MediaCommand::Previous);
+             ImGui::SetCursorPos(ImVec2(row.x+51,row.y));
+-            if (ui_draw::icon_button("##play",playing_now ? ui_draw::Icon::Pause : ui_draw::Icon::Play,playing_now ? "Pause" : "Play",53,true)) command(ap::airplay::MediaCommand::PlayPause);
++            if (ui_draw::icon_button("##play",playing_now ? ui_draw::Icon::Pause : ui_draw::Icon::Play,tr(playing_now ? "Pause" : "Play"),53,true)) command(ap::airplay::MediaCommand::PlayPause);
+             ImGui::SetCursorPos(ImVec2(row.x+123,row.y+10.5f));
+-            if (ui_draw::icon_button("##next",ui_draw::Icon::Next,"Next track",32)) command(ap::airplay::MediaCommand::Next);
++            if (ui_draw::icon_button("##next",ui_draw::Icon::Next,tr("Next track"),32)) command(ap::airplay::MediaCommand::Next);
+             ImGui::EndDisabled();
+             ImGui::SetCursorPos(ImVec2(row.x,row.y+65));
+             ImGui::PushFont(small_font);
+-            if (pending) ImGui::TextDisabled("Sending command...");
+-            else if (!ready) ImGui::TextDisabled("Remote control unavailable");
+-            else if (audio_command_failed_.load()) ImGui::TextDisabled("Command failed or unsupported");
++            if (pending) ImGui::TextDisabled("%s",tr("Sending command..."));
++            else if (!ready) ImGui::TextDisabled("%s",tr("Remote control unavailable"));
++            else if (audio_command_failed_.load()) ImGui::TextDisabled("%s",tr("Command failed or unsupported"));
+             ImGui::PopFont();
+         };
+ 
+@@ -1701,7 +1801,7 @@ void VideoRenderer::run(const std::string& title) {
          ImGui::Begin("##titlebar",nullptr,kPanelFlags|ImGuiWindowFlags_NoScrollbar);
          auto* title_draw = ImGui::GetWindowDrawList();
          ui_draw::icon(title_draw,ui_draw::Icon::Cast,ImVec2(20,12),20,ui_draw::blue);
@@ -1292,47 +1908,667 @@ index 426a93a..6956f6b 100644
          title_draw->AddLine(ImVec2(0,44),ImVec2(fw,44),line);
          ImGui::SetCursorPos(ImVec2(fw-144,0));
          auto window_control = [&](const char* id, ui_draw::Icon kind) {
-@@ -1733,6 +1794,21 @@ void VideoRenderer::run(const std::string& title) {
-         if (ui_draw::nav("##mirror","Screen mirroring",ui_draw::Icon::Screen,ui.page==2,162,ui.page==2?bold_font:io.FontDefault)) ui.page=2;
+@@ -1726,17 +1826,33 @@ void VideoRenderer::run(const std::string& title) {
+         ImGui::Begin("##navigation",nullptr,kPanelFlags|ImGuiWindowFlags_NoScrollbar);
+         auto* rail=ImGui::GetWindowDrawList();
+         rail->AddLine(ImVec2(side_bar_w-1,toolbar_h),ImVec2(side_bar_w-1,fh-status_bar_h),line);
+-        ImGui::PushFont(small_font); ImGui::SetCursorPosX(26); ImGui::TextDisabled("YOUR SPACE"); ImGui::PopFont();
++        ImGui::PushFont(small_font); ImGui::SetCursorPosX(26); ImGui::TextDisabled("%s",tr("YOUR SPACE")); ImGui::PopFont();
+         ImGui::Dummy(ImVec2(0,5));
+-        if (ui_draw::nav("##home","Home",ui_draw::Icon::Home,ui.page==0,162,ui.page==0?bold_font:io.FontDefault)) ui.page=0;
+-        if (ui_draw::nav("##music","Music",ui_draw::Icon::Music,ui.page==1,162,ui.page==1?bold_font:io.FontDefault)) ui.page=1;
+-        if (ui_draw::nav("##mirror","Screen mirroring",ui_draw::Icon::Screen,ui.page==2,162,ui.page==2?bold_font:io.FontDefault)) ui.page=2;
++        if (ui_draw::nav("##home",tr("Home"),ui_draw::Icon::Home,ui.page==0,162,ui.page==0?bold_font:io.FontDefault)) ui.page=0;
++        if (ui_draw::nav("##music",tr("Music"),ui_draw::Icon::Music,ui.page==1,162,ui.page==1?bold_font:io.FontDefault)) ui.page=1;
++        if (ui_draw::nav("##mirror",tr("Screen mirroring"),ui_draw::Icon::Screen,ui.page==2,162,ui.page==2?bold_font:io.FontDefault)) ui.page=2;
          ImGui::SetCursorPosY(fh-toolbar_h-status_bar_h-150);
-         if (ui_draw::nav("##settings","Settings",ui_draw::Icon::Settings,ui.settings_open,162,io.FontDefault)) ui.settings_open=!ui.settings_open;
-+        if (ImGui::Button("About Fucairserver", ImVec2(162, 28)))
-+            ImGui::OpenPopup("About Fucairserver");
-+        if (ImGui::BeginPopupModal("About Fucairserver", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+-        if (ui_draw::nav("##settings","Settings",ui_draw::Icon::Settings,ui.settings_open,162,io.FontDefault)) ui.settings_open=!ui.settings_open;
++        if (ui_draw::nav("##settings",tr("Settings"),ui_draw::Icon::Settings,ui.settings_open,162,io.FontDefault)) ui.settings_open=!ui.settings_open;
++        const std::string about_title = label_id("About Fucairserver", "about");
++        if (ImGui::Button(about_title.c_str(), ImVec2(162, 28)))
++            ImGui::OpenPopup("###about");
++        if (ImGui::BeginPopupModal(about_title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 +            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 390.f);
 +            ImGui::TextUnformatted("Fucairserver");
 +            ImGui::TextUnformatted("Eric Mingle 69 / REA");
 +            ImGui::Separator();
-+            ImGui::TextWrapped("Screen mirroring, audio and recording.");
-+            ImGui::TextWrapped("Built with AirPlay-Windows, UxPlay and Dear ImGui. Thanks to their authors and contributors.");
-+            ImGui::TextDisabled("AirPlay-Windows: GNU GPL version 3. See the bundled LICENSE.");
++            ImGui::TextWrapped("%s",tr("Screen mirroring, audio and recording."));
++            ImGui::TextWrapped("%s",tr("Built with AirPlay-Windows, UxPlay and Dear ImGui. Thanks to their authors and contributors."));
++            ImGui::TextDisabled("%s",tr("AirPlay-Windows: GNU GPL version 3. See the bundled LICENSE."));
 +            ImGui::PopTextWrapPos();
 +            ImGui::Spacing();
-+            if (ImGui::Button("Close", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
++            if (ImGui::Button(tr("Close"), ImVec2(90, 0))) ImGui::CloseCurrentPopup();
 +            ImGui::EndPopup();
 +        }
          ImGui::Separator(); ImGui::Dummy(ImVec2(0,3));
          ImGui::PushFont(small_font);
          ImVec2 p=ImGui::GetCursorScreenPos(); rail->AddCircleFilled(ImVec2(p.x+11,p.y+8),3.5f,IM_COL32(44,161,116,255));
-@@ -1881,7 +1957,7 @@ void VideoRenderer::run(const std::string& title) {
-             center_text(heading_font,hero_y+99,ink,"Your device.");
-             center_text(heading_font,hero_y+143,ink,"A little bigger.");
-             center_text(io.FontDefault,hero_y+194,muted,"Your music and your screen, right here on this PC.");
+-        ImGui::SetCursorPosX(36); ImGui::TextDisabled(has_active_dev ? "Device connected" : "Receiver available");
++        ImGui::SetCursorPosX(36); ImGui::TextDisabled("%s",tr(has_active_dev ? "Device connected" : "Receiver available"));
+         ImGui::SetCursorPosX(25); ImGui::PushTextWrapPos(side_bar_w-15); ImGui::TextUnformatted(receiver); ImGui::PopTextWrapPos();
+         ImGui::PopFont(); ImGui::End(); ImGui::PopStyleVar();
+ 
+@@ -1758,8 +1874,8 @@ void VideoRenderer::run(const std::string& title) {
+         };
+         auto decoding_note = [&](float bottom) {
+             const bool gpu=live_settings_ && live_settings_->mirror_hwaccel.load();
+-            const char* note=gpu ? "GPU acceleration enabled.\nPerformance issues? Try CPU decoding in Settings."
+-                                 : "CPU decoding selected.\nGPU acceleration is available in Settings.";
++            const char* note=tr(gpu ? "GPU acceleration enabled.\nPerformance issues? Try CPU decoding in Settings."
++                                 : "CPU decoding selected.\nGPU acceleration is available in Settings.");
+             const float wrap=std::max(180.f,width-(video_view?506.f:0.f));
+             const ImVec2 size=small_font->CalcTextSizeA(14,10000,wrap,note);
+             draw->AddText(small_font,14,ImVec2(origin.x+stage_w-42-size.x,origin.y+bottom-size.y),
+@@ -1769,26 +1885,26 @@ void VideoRenderer::run(const std::string& title) {
+             draw->AddRectFilled(ImVec2(origin.x+42,origin.y+30),ImVec2(origin.x+81,origin.y+69),IM_COL32(255,255,255,255),9);
+             draw->AddRect(ImVec2(origin.x+42,origin.y+30),ImVec2(origin.x+81,origin.y+69),line,9);
+             ui_draw::icon(draw,ui_draw::Icon::Phone,ImVec2(origin.x+51,origin.y+39),21,muted);
+-            text_at(bold_font,93,31,ink,active_dev.name.empty()?"Connected device":active_dev.name.c_str());
++            text_at(bold_font,93,31,ink,active_dev.name.empty()?tr("Connected device"):active_dev.name.c_str());
+             draw->AddCircleFilled(ImVec2(origin.x+97,origin.y+60),3,IM_COL32(44,161,116,255));
+-            text_at(small_font,107,51,muted,music_view ? "Connected · Audio" : "Connected · Screen mirroring");
++            text_at(small_font,107,51,muted,tr(music_view ? "Connected · Audio" : "Connected · Screen mirroring"));
+             if (firewall_notice) {
+                 const float badge_x=stage_w-300.f;
+                 draw->AddRectFilled(ImVec2(origin.x+badge_x,origin.y+36),ImVec2(origin.x+badge_x+125,origin.y+66),IM_COL32(255,247,227,255),15);
+                 draw->AddRect(ImVec2(origin.x+badge_x,origin.y+36),ImVec2(origin.x+badge_x+125,origin.y+66),IM_COL32(235,216,167,255),15);
+                 draw->AddCircleFilled(ImVec2(origin.x+badge_x+14,origin.y+51),3.5f,IM_COL32(183,135,41,255));
+-                text_at(small_font,badge_x+26,43,IM_COL32(123,87,30,255),"Check firewall");
++                text_at(small_font,badge_x+26,43,IM_COL32(123,87,30,255),tr("Check firewall"));
+             }
+             ImGui::SetCursorPos(ImVec2(stage_w-150.f,32));
+-            if (ui_draw::text_button("Disconnect",ImVec2(108,34)) && disconnect_handler_) disconnect_handler_();
++            if (ui_draw::text_button(tr("Disconnect"),ImVec2(108,34)) && disconnect_handler_) disconnect_handler_();
+         } else {
+-            text_at(page_font,42,36,ink,ui.page==0 ? "Welcome home." : ui.page==1 ? "Your music on this PC." : "Your screen, live.");
++            text_at(page_font,42,36,ink,tr(ui.page==0 ? "Welcome home." : ui.page==1 ? "Your music on this PC." : "Your screen, live."));
+             const float badge_x=stage_w-167.f;
+             const bool firewall_attention=firewall_notice && !has_active_dev;
+             draw->AddRectFilled(ImVec2(origin.x+badge_x,origin.y+36),ImVec2(origin.x+stage_w-42,origin.y+66),firewall_attention ? IM_COL32(255,247,227,255) : IM_COL32(233,243,236,255),15);
+             draw->AddRect(ImVec2(origin.x+badge_x,origin.y+36),ImVec2(origin.x+stage_w-42,origin.y+66),firewall_attention ? IM_COL32(235,216,167,255) : IM_COL32(217,234,221,255),15);
+             draw->AddCircleFilled(ImVec2(origin.x+badge_x+14,origin.y+51),3.5f,firewall_attention ? IM_COL32(183,135,41,255) : IM_COL32(44,161,116,255));
+-            text_at(small_font,badge_x+26,43,firewall_attention ? IM_COL32(123,87,30,255) : IM_COL32(55,117,87,255),has_active_dev ? "Connected" : firewall_attention ? "Check firewall" : "Ready to receive");
++            text_at(small_font,badge_x+26,43,firewall_attention ? IM_COL32(123,87,30,255) : IM_COL32(55,117,87,255),tr(has_active_dev ? "Connected" : firewall_attention ? "Check firewall" : "Ready to receive"));
+         }
+             if (firewall_notice) {
+                 const bool can_allow=firewall.state==ap::platform::FirewallState::NeedsRule;
+@@ -1796,16 +1912,17 @@ void VideoRenderer::run(const std::string& title) {
+                 const ImVec2 a(origin.x+42,origin.y+banner_y), b(origin.x+stage_w-42,origin.y+banner_y+banner_h);
+                 draw->AddRectFilled(a,b,IM_COL32(255,247,227,255),10);
+                 draw->AddRect(a,b,IM_COL32(235,216,167,255),10);
+-                const char* banner_title=can_allow ? "Allow AirPlay through Windows Firewall" :
+-                    firewall.state==ap::platform::FirewallState::Managed ? "Windows Firewall blocks incoming connections" : "Firewall check unavailable";
++                const char* banner_title=tr(can_allow ? "Allow AirPlay through Windows Firewall" :
++                    firewall.state==ap::platform::FirewallState::Managed ? "Windows Firewall blocks incoming connections" : "Firewall check unavailable");
+                 text_at(bold_font,58,banner_y+14,IM_COL32(123,87,30,255),banner_title);
+-                const char* detail=can_allow ? "Allow this app to receive connections from devices on your local network." : firewall.message.c_str();
++                const std::string firewall_message=fucairserver::tr_message(firewall.message);
++                const char* detail=can_allow ? tr("Allow this app to receive connections from devices on your local network.") : firewall_message.c_str();
+                 draw->AddText(small_font,16,ImVec2(a.x+16,a.y+44),IM_COL32(131,105,62,255),detail,nullptr,width-210);
+                 if (can_allow && !firewall.message.empty())
+-                    draw->AddText(small_font,16,ImVec2(a.x+16,a.y+82),IM_COL32(131,105,62,255),firewall.message.c_str(),nullptr,width-210);
++                    draw->AddText(small_font,16,ImVec2(a.x+16,a.y+82),IM_COL32(131,105,62,255),firewall_message.c_str(),nullptr,width-210);
+                 ImGui::SetCursorPos(ImVec2(stage_w-222.f,banner_y+41));
+                 ImGui::BeginDisabled(firewall.busy);
+-                if (can_allow && ui_draw::text_button(firewall.busy ? "Waiting for Windows..." : "Allow on local network",ImVec2(164,34)))
++                if (can_allow && ui_draw::text_button(tr(firewall.busy ? "Waiting for Windows..." : "Allow on local network"),ImVec2(164,34)))
+                     firewall_monitor.allow_local_network();
+                 ImGui::EndDisabled();
+             }
+@@ -1824,7 +1941,7 @@ void VideoRenderer::run(const std::string& title) {
+             }
+             const float tx=wide?cover_x+cover_size+43:42;
+             float ty=wide?cover_y+20:cover_y+cover_size+22;
+-            text_at(small_font,tx,ty,muted,playing_now ? "NOW PLAYING" : "PAUSED"); ty+=30;
++            text_at(small_font,tx,ty,muted,tr(playing_now ? "NOW PLAYING" : "PAUSED")); ty+=30;
+             auto track_line=[&](SDL_Texture* texture,int w,int h,float scale,ImU32 tint) {
+                 if (!texture || w<=0 || h<=0) return;
+                 const float fit=std::min(scale,(stage_w-tx-42)/w);
+@@ -1842,18 +1959,18 @@ void VideoRenderer::run(const std::string& title) {
+                 const float footer_y=std::max(stage_h-78.f,std::max(cover_y+cover_size,ty+188)+35);
+                 draw->AddLine(ImVec2(origin.x+42,origin.y+footer_y),ImVec2(origin.x+stage_w-42,origin.y+footer_y),line);
+                 ui_draw::icon(draw,ui_draw::Icon::Cast,ImVec2(origin.x+42,origin.y+footer_y+19),16,IM_COL32(114,145,123,255));
+-                text_at(small_font,67,footer_y+19,muted,"Playing from your device on this PC");
++                text_at(small_font,67,footer_y+19,muted,tr("Playing from your device on this PC"));
+                 ImGui::SetCursorPosY(footer_y+45); ImGui::Dummy(ImVec2(1,1));
+             }
+         } else if (video_view) {
+             ImGui::SetCursorPos(ImVec2(42,stage_h-47.f));
+             const bool recording=recorder_ && recorder_->status().recording;
+-            if (ui_draw::text_button(recording ? "Stop recording" : "Record",ImVec2(125,34))) toggle_recording();
+-            ImGui::SameLine(); if (ui_draw::text_button("Fullscreen",ImVec2(110,34))) toggle_fullscreen();
+-            ImGui::SameLine(); if (ui_draw::text_button("Hide interface",ImVec2(120,34))) ui.chromeless=true;
++            if (ui_draw::text_button(tr(recording ? "Stop recording" : "Record"),ImVec2(125,34))) toggle_recording();
++            ImGui::SameLine(); if (ui_draw::text_button(tr("Fullscreen"),ImVec2(110,34))) toggle_fullscreen();
++            ImGui::SameLine(); if (ui_draw::text_button(tr("Hide interface"),ImVec2(120,34))) ui.chromeless=true;
+             ImGui::SameLine();
+             ImGui::BeginDisabled(!live_settings_);
+-            if (ui_draw::text_button("Rotation",ImVec2(98,34))) ImGui::OpenPopup("##quick_rotation");
++            if (ui_draw::text_button(tr("Rotation"),ImVec2(98,34))) ImGui::OpenPopup("##quick_rotation");
+             const ImVec2 rotation_button=ImGui::GetItemRectMin();
+             draw->AddTriangleFilled(ImVec2(rotation_button.x+82,rotation_button.y+15),
+                                     ImVec2(rotation_button.x+90,rotation_button.y+15),
+@@ -1864,7 +1981,7 @@ void VideoRenderer::run(const std::string& title) {
+             if (ImGui::BeginPopup("##quick_rotation")) {
+                 const int selected=live_settings_->video_rotation.load()+1;
+                 for (int i=0;i<IM_ARRAYSIZE(kRotationModes);++i) {
+-                    if (ImGui::MenuItem(kRotationModes[i],nullptr,selected==i))
++                    if (ImGui::MenuItem(tr(kRotationModes[i]),nullptr,selected==i))
+                         live_settings_->video_rotation.store(i-1);
+                 }
+                 ImGui::EndPopup();
+@@ -1878,20 +1995,20 @@ void VideoRenderer::run(const std::string& title) {
+             draw->AddRectFilled(tile,ImVec2(tile.x+76,tile.y+76),IM_COL32(233,239,253,255),22);
+             draw->AddRect(tile,ImVec2(tile.x+76,tile.y+76),IM_COL32(219,229,252,255),22);
+             ui_draw::icon(draw,ui_draw::Icon::Cast,ImVec2(tile.x+19,tile.y+19),38,ui_draw::blue);
+-            center_text(heading_font,hero_y+99,ink,"Your device.");
+-            center_text(heading_font,hero_y+143,ink,"A little bigger.");
+-            center_text(io.FontDefault,hero_y+194,muted,"Your music and your screen, right here on this PC.");
 -            center_text(io.FontDefault,hero_y+219,muted,"From your iPhone or iPad.");
-+            center_text(io.FontDefault,hero_y+219,muted,"From your Mac, iPhone or iPad.");
++            center_text(heading_font,hero_y+99,ink,tr("Your device."));
++            center_text(heading_font,hero_y+143,ink,tr("A little bigger."));
++            center_text(io.FontDefault,hero_y+194,muted,tr("Your music and your screen, right here on this PC."));
++            center_text(io.FontDefault,hero_y+219,muted,tr("From your Mac, iPhone or iPad."));
              const float card_w=std::min(440.f,width),card_x=(stage_w-card_w)/2,card_y=hero_y+(stage_h<720?248:268);
              const ImVec2 cp(origin.x+card_x,origin.y+card_y);
              draw->AddRectFilled(cp,ImVec2(cp.x+card_w,cp.y+78),IM_COL32_WHITE,12);
-@@ -2281,7 +2357,7 @@ void VideoRenderer::run(const std::string& title) {
+             draw->AddRect(cp,ImVec2(cp.x+card_w,cp.y+78),line,12);
+-            text_at(small_font,card_x+20,card_y+15,muted,"SELECT ON YOUR DEVICE");
++            text_at(small_font,card_x+20,card_y+15,muted,tr("SELECT ON YOUR DEVICE"));
+             draw->PushClipRect(cp,ImVec2(cp.x+card_w-56,cp.y+78),true);
+             text_at(receiver_font,card_x+20,card_y+38,ink,receiver);
+             draw->PopClipRect();
+             ImGui::SetCursorPos(ImVec2(card_x+card_w-54,card_y+21));
+-            if (ui_draw::icon_button("##rename",ui_draw::Icon::Settings,"Receiver settings")) ui.settings_open=true;
++            if (ui_draw::icon_button("##rename",ui_draw::Icon::Settings,tr("Receiver settings"))) ui.settings_open=true;
+             const float steps_y=card_y+(stage_h<720?105:121);
+             draw->AddLine(ImVec2(origin.x+42,origin.y+steps_y),ImVec2(origin.x+stage_w-42,origin.y+steps_y),line);
+             const char* titles[]={"Same Wi-Fi network","Choose your mode","Select your PC"};
+@@ -1902,10 +2019,10 @@ void VideoRenderer::run(const std::string& title) {
+                 draw->AddCircleFilled(circle,12,IM_COL32_WHITE,24); draw->AddCircle(circle,12,line,24);
+                 char n[2]={static_cast<char>('1'+i),0};
+                 text_at(small_font,x+9,steps_y+32,muted,n);
+-                text_at(bold_font,x,steps_y+67,ink,titles[i]);
+-                draw->AddText(small_font,16,ImVec2(origin.x+x,origin.y+steps_y+93),muted,descriptions[i],nullptr,(width-44)/3);
++                text_at(bold_font,x,steps_y+67,ink,tr(titles[i]));
++                draw->AddText(small_font,16,ImVec2(origin.x+x,origin.y+steps_y+93),muted,tr(descriptions[i]),nullptr,(width-44)/3);
+             }
+-            const char* help="My PC isn't showing up";
++            const char* help=tr("My PC isn't showing up");
+             const float help_w=small_font->CalcTextSizeA(16,10000,0,help).x;
+             ImGui::SetCursorPos(ImVec2((stage_w-help_w)/2,steps_y+157));
+             if (ui_draw::surface("##connection_help",ImVec2(help_w,22))) ImGui::OpenPopup("Connection help");
+@@ -1922,29 +2039,29 @@ void VideoRenderer::run(const std::string& title) {
+             ImGui::PushStyleColor(ImGuiCol_Border,ImVec4(230/255.f,232/255.f,231/255.f,1));
+             if (ImGui::BeginPopup("Connection help",ImGuiWindowFlags_NoMove)) {
+                 ImGui::PushFont(page_font);
+-                ImGui::TextUnformatted("Can't find your PC?");
++                ImGui::TextUnformatted(tr("Can't find your PC?"));
+                 ImGui::PopFont();
+                 ImGui::SameLine(help_card_width-59);
+-                if (ui_draw::icon_button("##close_help",ui_draw::Icon::Close,"Close help")) ImGui::CloseCurrentPopup();
++                if (ui_draw::icon_button("##close_help",ui_draw::Icon::Close,tr("Close help"))) ImGui::CloseCurrentPopup();
+                 ImGui::Spacing();
+                 ImGui::PushTextWrapPos(help_card_width-24);
+                 auto help_step=[&](const char* title,const char* description) {
+-                    ImGui::PushFont(bold_font); ImGui::TextUnformatted(title); ImGui::PopFont();
+-                    ImGui::PushFont(small_font); ImGui::TextDisabled("%s",description); ImGui::PopFont();
++                    ImGui::PushFont(bold_font); ImGui::TextUnformatted(tr(title)); ImGui::PopFont();
++                    ImGui::PushFont(small_font); ImGui::TextDisabled("%s",tr(description)); ImGui::PopFont();
+                     ImGui::Dummy(ImVec2(0,8));
+                 };
+                 help_step("1. Use the same network", "Connect your iPhone or iPad and this PC to the same Wi-Fi network.");
+                 help_step("2. Check your VPN", "A VPN can hide local devices. Check that it allows access to your local network.");
+                 help_step("3. Check Windows Firewall", "If a firewall warning is shown, choose Allow on local network.");
+                 ImGui::Separator();
+-                ImGui::PushFont(small_font); ImGui::TextDisabled("Then reopen AirPlay on your device."); ImGui::PopFont();
++                ImGui::PushFont(small_font); ImGui::TextDisabled("%s",tr("Then reopen AirPlay on your device.")); ImGui::PopFont();
+                 ImGui::PopTextWrapPos();
+                 ImGui::EndPopup();
+             }
+             ImGui::PopStyleColor(2);
+             ImGui::PopStyleVar(4);
+             const float footer_y=std::max(steps_y+(stage_h<720?185:203),stage_h-34.f);
+-            text_at(small_font,42,footer_y,IM_COL32(145,154,147,255),"Windows · Local network");
++            text_at(small_font,42,footer_y,IM_COL32(145,154,147,255),tr("Windows · Local network"));
+             if (ui.page==2) decoding_note(footer_y+16);
+             ImGui::SetCursorPosY(footer_y+16); ImGui::Dummy(ImVec2(1,1));
+         }
+@@ -1973,10 +2090,10 @@ void VideoRenderer::run(const std::string& title) {
+                 ImGui::PushStyleColor(ImGuiCol_Text,
+                                       ImVec4(.125f,.149f,.161f,1));
+                 ImGui::PushFont(page_font);
+-                ImGui::TextUnformatted("Settings");
++                ImGui::TextUnformatted(tr("Settings"));
+                 ImGui::PopFont();
+                 ImGui::SameLine(opts_bar_w-65);
+-                if (ui_draw::icon_button("##close_settings",ui_draw::Icon::Close,"Close settings")) ui.settings_open = false;
++                if (ui_draw::icon_button("##close_settings",ui_draw::Icon::Close,tr("Close settings"))) ui.settings_open = false;
+                 ImGui::PopStyleColor();
+                 ImGui::Separator();
+                 // Wrap descriptive text to the panel width so long
+@@ -1986,32 +2103,41 @@ void VideoRenderer::run(const std::string& title) {
+                 auto settings_section = [&](const char* label, ImGuiTreeNodeFlags flags = 0) {
+                     ImGui::PushFont(bold_font);
+                     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+-                    const bool open = ImGui::CollapsingHeader(label,flags);
++                    const bool open = ImGui::CollapsingHeader((std::string(tr(label))+"###"+label).c_str(),flags);
+                     ImGui::PopStyleVar(); ImGui::PopFont();
+                     return open;
+                 };
++                if (settings_section("Language", ImGuiTreeNodeFlags_DefaultOpen)) {
++                    // Language names stay in their own script so either
++                    // reader can find the way back.
++                    const char* languages[] = {tr("Follow system"), "简体中文", "English"};
++                    int language = ui_language;
++                    ImGui::SetNextItemWidth(-1.0f);
++                    if (ImGui::Combo("##language", &language, languages, IM_ARRAYSIZE(languages)))
++                        set_language(language);
++                }
+                 if (live_settings_ && settings_section("Receiver name",
+                         ImGuiTreeNodeFlags_DefaultOpen)) {
+                     ImGui::SetNextItemWidth(-1.0f);
+-                    const bool enter = ImGui::InputText("##receiver_name",
++                    const bool enter = ime.input_text("##receiver_name",
+                         receiver_name_buf.data(), receiver_name_buf.size(),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+                     const auto name = ap::airplay::normalize_receiver_name(receiver_name_buf.data());
+                     const bool changed = name != live_settings_->receiver_name();
+-                    ImGui::BeginDisabled(name.empty() || !changed);
++                    ImGui::BeginDisabled(name.empty() || !changed || ime.composing());
+                     ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.14f,.40f,.92f,1));
+                     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1,1,1,1));
+-                    const bool apply = ImGui::Button("Apply name");
++                    const bool apply = ImGui::Button(label_id("Apply name","apply_name").c_str());
+                     ImGui::PopStyleColor(2);
+                     ImGui::EndDisabled();
+-                    if ((apply || enter) && !name.empty() && changed) {
++                    if ((apply || enter) && !ime.composing() && !name.empty() && changed) {
+                         live_settings_->set_receiver_name(name);
+                         std::snprintf(receiver_name_buf.data(), receiver_name_buf.size(), "%s", name.c_str());
+                     }
+                     if (name.empty())
+-                        ImGui::TextDisabled("Use a name without dots or backslashes (max. 50 UTF-8 bytes).");
++                        ImGui::TextDisabled("%s",tr("Use a name without dots or backslashes (max. 50 UTF-8 bytes)."));
+                     else
+-                        ImGui::TextDisabled("Shown in AirPlay on your devices. Saved automatically.");
++                        ImGui::TextDisabled("%s",tr("Shown in AirPlay on your devices. Saved automatically."));
+                 }
+                 if (settings_section("Mirror resolution",
+                         ImGuiTreeNodeFlags_DefaultOpen)) {
+@@ -2047,10 +2173,10 @@ void VideoRenderer::run(const std::string& title) {
+                         const char* preview;
+                         if (custom_resolution) {
+                             std::snprintf(preview_buf, sizeof(preview_buf),
+-                                          "Custom: %dx%d", cur_w, cur_h);
++                                          tr("Custom: %dx%d"), cur_w, cur_h);
+                             preview = preview_buf;
+                         } else {
+-                            preview = presets[sel].label;
++                            preview = tr(presets[sel].label);
+                         }
+ 
+                         ImGui::SetNextItemWidth(-1);
+@@ -2058,7 +2184,7 @@ void VideoRenderer::run(const std::string& title) {
+                             for (int i = 0; i < (int)IM_ARRAYSIZE(presets); ++i) {
+                                 const bool is_sel =
+                                     (!custom_resolution && sel == i);
+-                                if (ImGui::Selectable(presets[i].label,
++                                if (ImGui::Selectable(tr(presets[i].label),
+                                                       is_sel)) {
+                                     custom_resolution = false;
+                                     live_settings_->mirror_width.store(presets[i].w);
+@@ -2067,7 +2193,7 @@ void VideoRenderer::run(const std::string& title) {
+                                 if (is_sel) ImGui::SetItemDefaultFocus();
+                             }
+                             ImGui::Separator();
+-                            if (ImGui::Selectable("Custom...", custom_resolution)) {
++                            if (ImGui::Selectable(tr("Custom..."), custom_resolution)) {
+                                 custom_resolution = true;
+                             }
+                             ImGui::EndCombo();
+@@ -2088,12 +2214,12 @@ void VideoRenderer::run(const std::string& title) {
+                             if (!height_active) height_buf = cur_h;
+ 
+                             ImGui::SetNextItemWidth(80);
+-                            ImGui::InputInt("Width##custom",
++                            ImGui::InputInt(label_id("Width","custom_width").c_str(),
+                                             &width_buf, 0, 0);
+                             width_active = ImGui::IsItemActive();
+                             ImGui::SameLine();
+                             ImGui::SetNextItemWidth(80);
+-                            ImGui::InputInt("Height##custom",
++                            ImGui::InputInt(label_id("Height","custom_height").c_str(),
+                                             &height_buf, 0, 0);
+                             height_active = ImGui::IsItemActive();
+ 
+@@ -2105,59 +2231,59 @@ void VideoRenderer::run(const std::string& title) {
+                                 height_buf != cur_h) {
+                                 live_settings_->mirror_height.store(height_buf);
+                             }
+-                            ImGui::TextDisabled(
+-                                "Range: 320-7680 x 240-4320");
++                            ImGui::TextDisabled("%s",
++                                tr("Range: 320-7680 x 240-4320"));
+                         }
+-                        ImGui::TextDisabled(
+-                            "Maximum video size. Your device chooses the actual stream resolution.");
++                        ImGui::TextDisabled("%s",
++                            tr("Maximum video size. Your device chooses the actual stream resolution."));
+                         if (video_tex_w > 0 && video_tex_h > 0)
+-                            ImGui::TextDisabled("Received: %d x %d", video_tex_w, video_tex_h);
+-                        ImGui::TextDisabled("Applies on next device connection");
++                            ImGui::TextDisabled(tr("Received: %d x %d"), video_tex_w, video_tex_h);
++                        ImGui::TextDisabled("%s",tr("Applies on next device connection"));
+                     } else {
+-                        ImGui::TextDisabled("(LiveSettings not wired)");
++                        ImGui::TextDisabled("%s",tr("(LiveSettings not wired)"));
+                     }
+                 }
+                 if (settings_section("Video decoder",
+                         ImGuiTreeNodeFlags_DefaultOpen)) {
+                     if (live_settings_) {
+                         bool hw = live_settings_->mirror_hwaccel.load();
+-                        if (ImGui::Checkbox("Use GPU acceleration",
++                        if (ImGui::Checkbox(label_id("Use GPU acceleration","gpu").c_str(),
+                                             &hw)) {
+                             live_settings_->mirror_hwaccel.store(hw);
+                         }
+-                        ImGui::TextDisabled(
++                        ImGui::TextDisabled("%s",tr(
+                             hw
+                               ? "Uses your graphics card when available."
+-                              : "Uses your processor to decode video.");
+-                        ImGui::TextDisabled("Applies on next device connection");
++                              : "Uses your processor to decode video."));
++                        ImGui::TextDisabled("%s",tr("Applies on next device connection"));
+ 
+                         ImGui::Separator();
+ 
+                         bool vsync = live_settings_->vsync_enabled.load();
+-                        if (ImGui::Checkbox("Synchronize with display", &vsync)) {
++                        if (ImGui::Checkbox(label_id("Synchronize with display","vsync").c_str(), &vsync)) {
+                             live_settings_->vsync_enabled.store(vsync);
+                         }
+-                        ImGui::TextDisabled(
++                        ImGui::TextDisabled("%s",tr(
+                             vsync
+                               ? "Sync presents to monitor refresh."
+                               : "Present immediately (lower latency,"
+-                                " visible tearing on fast pans).");
+-                        ImGui::TextDisabled("Applies live (no reconnect needed)");
++                                " visible tearing on fast pans)."));
++                        ImGui::TextDisabled("%s",tr("Applies live (no reconnect needed)"));
+                     } else {
+-                        ImGui::TextDisabled("(LiveSettings not wired)");
++                        ImGui::TextDisabled("%s",tr("(LiveSettings not wired)"));
+                     }
+                 }
+                 if (settings_section("Recording")) {
+                     const auto rec = recorder_->status();
+-                    ImGui::TextUnformatted("Folder");
++                    ImGui::TextUnformatted(tr("Folder"));
+ #if defined(_WIN32)
+                     ImGui::SetNextItemWidth(-92.0f);
+ #endif
+-                    ImGui::InputText("##recording_folder", recording_dir.data(),
++                    ime.input_text("##recording_folder", recording_dir.data(),
+                                      recording_dir.size());
+ #if defined(_WIN32)
+                     ImGui::SameLine();
+-                    if (ImGui::Button("Browse...", ImVec2(-1.0f, 0.0f))) {
++                    if (ImGui::Button(label_id("Browse...","browse").c_str(), ImVec2(-1.0f, 0.0f))) {
+                         std::string selected_folder;
+                         if (browse_recording_folder(
+                                 window, recording_dir.data(), selected_folder)) {
+@@ -2168,79 +2294,81 @@ void VideoRenderer::run(const std::string& title) {
+                     }
+ #endif
+                     const char* encoder_modes[] = {
+-                        "Auto (GPU preferred)", "GPU only", "CPU only"
++                        tr("Auto (GPU preferred)"), tr("GPU only"), tr("CPU only")
+                     };
+                     const char* video_codecs[] = {
+-                        "H.264 (compatible)", "H.265 / HEVC (smaller)"
++                        tr("H.264 (compatible)"), tr("H.265 / HEVC (smaller)")
+                     };
+                     int video_codec =
+                         static_cast<int>(recording_options.codec);
+-                    if (ImGui::Combo("Video codec", &video_codec,
++                    if (ImGui::Combo(label_id("Video codec","video_codec").c_str(), &video_codec,
+                                      video_codecs, 2)) {
+                         recording_options.codec =
+                             static_cast<VideoRecorder::VideoCodec>(video_codec);
+                     }
+                     int encoder_mode =
+                         static_cast<int>(recording_options.encoder);
+-                    if (ImGui::Combo("Encoder", &encoder_mode,
++                    if (ImGui::Combo(label_id("Encoder","encoder").c_str(), &encoder_mode,
+                                      encoder_modes, 3)) {
+                         recording_options.encoder =
+                             static_cast<VideoRecorder::EncoderMode>(encoder_mode);
+                     }
+-                    ImGui::SliderInt("Bitrate (Mbps)",
++                    ImGui::SliderInt(label_id("Bitrate (Mbps)","bitrate").c_str(),
+                                      &recording_options.bitrate_mbps, 2, 40);
+-                    ImGui::TextDisabled(
+-                        "Lower bitrate = smaller file / more compression");
++                    ImGui::TextDisabled("%s",
++                        tr("Lower bitrate = smaller file / more compression"));
+                     if (rec.recording)
+-                        ImGui::TextDisabled("Settings apply to the next recording");
++                        ImGui::TextDisabled("%s",tr("Settings apply to the next recording"));
+                     if (rec.recording) {
+                         const int64_t seconds = rec.elapsed_ms / 1000;
+                         ImGui::TextColored(ImVec4(1.0f, 0.30f, 0.32f, 1.0f),
+-                                           "REC  %02lld:%02lld",
++                                           tr("REC  %02lld:%02lld"),
+                                            static_cast<long long>(seconds / 60),
+                                            static_cast<long long>(seconds % 60));
+-                        ImGui::Text("Frames: %llu",
++                        ImGui::Text(tr("Frames: %llu"),
+                             static_cast<unsigned long long>(rec.frames));
+-                        ImGui::Text("Audio: %s",
+-                            rec.audio_samples > 0 ? "AAC stereo" : "waiting for PCM");
++                        ImGui::Text(tr("Audio: %s"),
++                            tr(rec.audio_samples > 0 ? "AAC stereo" : "waiting for PCM"));
+                         if (rec.dropped > 0) {
+                             ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.25f, 1.0f),
+-                                "Queue drops: %llu",
++                                tr("Queue drops: %llu"),
+                                 static_cast<unsigned long long>(rec.dropped));
+                         }
+                         if (!rec.codec.empty())
+-                            ImGui::TextWrapped("Codec: %s", rec.codec.c_str());
+-                        if (ImGui::Button("Stop recording", ImVec2(-1, 0)))
++                            ImGui::TextWrapped(tr("Codec: %s"), rec.codec.c_str());
++                        if (ImGui::Button(label_id("Stop recording","stop_recording").c_str(), ImVec2(-1, 0)))
+                             toggle_recording();
+                     } else {
+-                        ImGui::TextDisabled("MP4 video (decoded AirPlay stream)");
+-                        if (ImGui::Button("Start recording", ImVec2(-1, 0)))
++                        ImGui::TextDisabled("%s",tr("MP4 video (decoded AirPlay stream)"));
++                        if (ImGui::Button(label_id("Start recording","start_recording").c_str(), ImVec2(-1, 0)))
+                             toggle_recording();
+                     }
+                     if (!rec.output_path.empty())
+-                        ImGui::TextWrapped("File: %s", rec.output_path.c_str());
++                        ImGui::TextWrapped(tr("File: %s"), rec.output_path.c_str());
+                     if (!rec.error.empty())
+                         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                                            "%s", rec.error.c_str());
+                 }
+                 ImGui::Separator();
+                 if (settings_section("Advanced")) {
+-                    ImGui::Checkbox("Show diagnostics", &ui.diagnostics);
++                    ImGui::Checkbox(label_id("Show diagnostics","diagnostics").c_str(), &ui.diagnostics);
+                 if (settings_section("Rotation")) {
+                     if (live_settings_) {
+                         int selected = live_settings_->video_rotation.load() + 1;
+                         ImGui::SetNextItemWidth(-1.0f);
+-                        if (ImGui::Combo("##video_rotation", &selected, kRotationModes, IM_ARRAYSIZE(kRotationModes)))
++                        const char* rotation_modes[IM_ARRAYSIZE(kRotationModes)];
++                        for (int i = 0; i < IM_ARRAYSIZE(kRotationModes); ++i) rotation_modes[i] = tr(kRotationModes[i]);
++                        if (ImGui::Combo("##video_rotation", &selected, rotation_modes, IM_ARRAYSIZE(rotation_modes)))
+                             live_settings_->video_rotation.store(selected - 1);
+-                        ImGui::TextDisabled(
++                        ImGui::TextDisabled("%s",tr(
+                             "Auto follows the orientation sent by the device."
+-                            " Manual angles rotate clockwise from the received image.");
++                            " Manual angles rotate clockwise from the received image."));
+                         if (video_tex_w > 0 && video_tex_h > 0)
+-                            ImGui::TextDisabled("Received: %s (%d x %d)",
+-                                video_tex_w > video_tex_h ? "Landscape" :
+-                                video_tex_w < video_tex_h ? "Portrait" : "Square",
++                            ImGui::TextDisabled(tr("Received: %s (%d x %d)"),
++                                tr(video_tex_w > video_tex_h ? "Landscape" :
++                                video_tex_w < video_tex_h ? "Portrait" : "Square"),
+                                 video_tex_w, video_tex_h);
+-                        ImGui::TextDisabled("Applies live to display only; recording is unchanged.");
++                        ImGui::TextDisabled("%s",tr("Applies live to display only; recording is unchanged."));
+                     }
+                 }
+                 if (settings_section("Frame rate")) {
+@@ -2252,54 +2380,54 @@ void VideoRenderer::run(const std::string& title) {
+                         // keep the underlying fields in lockstep.
+                         int cap = live_settings_->max_fps.load();
+                         ImGui::SetNextItemWidth(200);
+-                        if (ImGui::SliderInt("Frame rate cap",
+-                                             &cap, 1, 60, "%d fps")) {
++                        if (ImGui::SliderInt(label_id("Frame rate cap","frame_rate_cap").c_str(),
++                                             &cap, 1, 60, tr("%d fps"))) {
+                             live_settings_->max_fps.store(cap);
+                             live_settings_->refresh_rate.store(cap);
+                         }
+-                        ImGui::TextDisabled(
++                        ImGui::TextDisabled("%s",tr(
+                             "iOS caps mirror at 60 fps regardless of hint;"
+-                            " lower values force a deterministic cadence.");
+-                        ImGui::TextDisabled("Applies on next device connection");
++                            " lower values force a deterministic cadence."));
++                        ImGui::TextDisabled("%s",tr("Applies on next device connection"));
+                     } else {
+-                        ImGui::TextDisabled("(LiveSettings not wired)");
++                        ImGui::TextDisabled("%s",tr("(LiveSettings not wired)"));
+                     }
+                 }
+                 if (settings_section("Compression")) {
+                     if (live_settings_) {
+                         bool hevc = live_settings_->hevc_enabled.load();
+-                        if (ImGui::Checkbox("Allow HEVC (H.265)", &hevc)) {
++                        if (ImGui::Checkbox(label_id("Allow HEVC (H.265)","hevc").c_str(), &hevc)) {
+                             live_settings_->hevc_enabled.store(hevc);
+                         }
+-                        ImGui::TextDisabled(
++                        ImGui::TextDisabled("%s",tr(
+                             hevc
+                               ? "The device may pick HEVC at high resolution"
+-                              : "Force H.264 (more CPU, more bandwidth)");
+-                        ImGui::TextDisabled("Applies on next device connection");
++                              : "Force H.264 (more CPU, more bandwidth)"));
++                        ImGui::TextDisabled("%s",tr("Applies on next device connection"));
+                     } else {
+-                        ImGui::TextDisabled("(LiveSettings not wired)");
++                        ImGui::TextDisabled("%s",tr("(LiveSettings not wired)"));
                      }
                  }
                  if (settings_section("Network")) {
 -                    ImGui::TextDisabled("RTSP   :7000");
-+                    ImGui::TextDisabled("RTSP port advertised through AirPlay");
++                    ImGui::TextDisabled("%s",tr("RTSP port advertised through AirPlay"));
                      ImGui::TextDisabled("HLS    :7100");
-                     ImGui::TextDisabled("mDNS   advertising");
+-                    ImGui::TextDisabled("mDNS   advertising");
++                    ImGui::TextDisabled("%s",tr("mDNS   advertising"));
                  }
-@@ -2500,6 +2576,7 @@ void VideoRenderer::run(const std::string& title) {
+                 if (settings_section("Keyboard shortcuts")) {
+-                    ImGui::BulletText("F / F11 / double-click  Toggle fullscreen");
+-                    ImGui::BulletText("H       Hide / show the interface");
+-                    ImGui::BulletText("R       Start / stop recording");
+-                    ImGui::BulletText("Esc     Exit fullscreen / show UI / quit");
++                    ImGui::BulletText("%s",tr("F / F11 / double-click  Toggle fullscreen"));
++                    ImGui::BulletText("%s",tr("H       Hide / show the interface"));
++                    ImGui::BulletText("%s",tr("R       Start / stop recording"));
++                    ImGui::BulletText("%s",tr("Esc     Exit fullscreen / show UI / quit"));
+                 }
+                 }
+                 ImGui::Spacing();
+                 ImGui::Separator();
+-                ImGui::TextDisabled("Restore all app preferences to their defaults.");
++                ImGui::TextDisabled("%s",tr("Restore all app preferences to their defaults."));
+                 ImGui::BeginDisabled(!live_settings_);
+-                if (ui_draw::text_button("Reset all settings",ImVec2(-1,36))) reset_all_settings();
++                if (ui_draw::text_button(tr("Reset all settings"),ImVec2(-1,36))) reset_all_settings();
+                 ImGui::EndDisabled();
+                 if (ImGui::GetTime() < settings_reset_notice_until)
+-                    ImGui::TextDisabled("Default settings restored.");
++                    ImGui::TextDisabled("%s",tr("Default settings restored."));
+                 ImGui::PopTextWrapPos();
+             }
+             ImGui::EndChild();
+@@ -2340,25 +2468,25 @@ void VideoRenderer::run(const std::string& title) {
+             // "Streaming" = paired AND frames flowing; "Connected" =
+             // paired but iOS quiet (static menu, paused video — common
+             // in mirror); "Idle" = nothing connected.
+-            const char* state_label =
++            const char* state_label = tr(
+                 has_active_dev
+                     ? (has_video ? (playing ? "Streaming" : "Paused")
+                                  : "Connected")
+-                    : "Idle";
+-            ImGui::Text("State: %s", state_label);
++                    : "Idle");
++            ImGui::Text(tr("State: %s"), state_label);
+             sep();
+             if (vid_w > 0 && vid_h > 0) {
+-                ImGui::Text("Video: %dx%d @ %.1f", vid_w, vid_h,
++                ImGui::Text(tr("Video: %dx%d @ %.1f"), vid_w, vid_h,
+                             has_video ? vid_fps : 0.0f);
+             } else {
+-                ImGui::TextDisabled("Video: -");
++                ImGui::TextDisabled("%s",tr("Video: -"));
+             }
+             sep();
+-            ImGui::Text("Frames: %llu", static_cast<unsigned long long>(total));
++            ImGui::Text(tr("Frames: %llu"), static_cast<unsigned long long>(total));
+             sep();
+-            ImGui::Text("Stage: %dx%d", stage_w, stage_h);
++            ImGui::Text(tr("Stage: %dx%d"), stage_w, stage_h);
+             sep();
+-            ImGui::Text("Renderer: %.0f fps", io_ui.Framerate);
++            ImGui::Text(tr("Renderer: %.0f fps"), io_ui.Framerate);
+             sep();
+             const float    mbps  =
+                 payload_mbps_ema_.load(std::memory_order_relaxed);
+@@ -2382,17 +2510,17 @@ void VideoRenderer::run(const std::string& title) {
+                 }
+                 return std::string(buf);
+             };
+-            ImGui::Text("BW: %.1f Mbps", has_video ? mbps : 0.0f);
++            ImGui::Text(tr("BW: %.1f Mbps"), has_video ? mbps : 0.0f);
+             sep();
+-            ImGui::Text("Total: %s", fmt_total(total_b).c_str());
++            ImGui::Text(tr("Total: %s"), fmt_total(total_b).c_str());
+             sep();
+             const float lat_ms =
+                 pipeline_latency_ms_ema_.load(std::memory_order_relaxed);
+             // Only show when a recent video frame populated it,
+             // otherwise the EMA is stale or zero.
+-            ImGui::Text("Lat: %.1f ms", has_video ? lat_ms : 0.0f);
++            ImGui::Text(tr("Lat: %.1f ms"), has_video ? lat_ms : 0.0f);
+             sep();
+-            ImGui::TextDisabled("HLS backend: %s", kHlsBackend);
++            ImGui::TextDisabled(tr("HLS backend: %s"), kHlsBackend);
+             ImGui::EndTable();
+             }
+         }
+@@ -2455,6 +2583,7 @@ void VideoRenderer::run(const std::string& title) {
+             }
+         }
+ 
++        ime.end_frame();
+         publish_preferences();
+         ImGui::Render();
+         ImGui_ImplSDLRenderer2_RenderDrawData(
+@@ -2500,6 +2629,7 @@ void VideoRenderer::run(const std::string& title) {
      ImGui_ImplSDLRenderer2_Shutdown();
      ImGui_ImplSDL2_Shutdown();
      ImGui::DestroyContext();
@@ -1410,7 +2646,7 @@ index 6250674..92a078f 100644
      } catch (const std::exception& error) { std::cerr<<error.what()<<'\n';return 1; }
  }
 diff --git a/tools/test_settings.cpp b/tools/test_settings.cpp
-index 6e164e8..b7f3569 100644
+index 6e164e8..36b2a7f 100644
 --- a/tools/test_settings.cpp
 +++ b/tools/test_settings.cpp
 @@ -15,7 +15,7 @@ int main() {
@@ -1422,7 +2658,21 @@ index 6e164e8..b7f3569 100644
          wanted.mirror_width = 3840; wanted.mirror_height = 2160;
          wanted.mirror_hwaccel = true;
          wanted.ui.diagnostics = true;
-@@ -44,6 +44,16 @@ int main() {
+@@ -27,11 +27,13 @@ int main() {
+         wanted.ui.recording_codec = 1;
+         wanted.ui.recording_encoder = 2;
+         wanted.ui.recording_bitrate = 24;
++        wanted.ui.language = 1;
+         require(ap::save_settings(wanted, path), "initial save failed");
+         require(ap::load_settings(path) == wanted, "preferences lost on reload");
+         wanted.ui.diagnostics = false;
+         wanted.mirror_hwaccel = false;
+         wanted.ui.recording_bitrate = 40;
++        wanted.ui.language = 2;
+         require(ap::save_settings(wanted, path), "replacement save failed");
+         require(ap::load_settings(path) == wanted, "replacement did not preserve preferences");
+         ap::airplay::LiveSettings live;
+@@ -44,10 +46,20 @@ int main() {
          const auto legacy = ap::load_settings(path);
          require(legacy.receiver_name == "Legacy receiver" && legacy.mirror_hwaccel, "legacy preferences broken");
          require(legacy.ui == ap::UiPreferences{}, "missing fields do not use defaults");
@@ -1439,3 +2689,60 @@ index 6e164e8..b7f3569 100644
          {
              std::ofstream invalid(path);
              invalid << "window_width=-5\nwindow_height=9999999\nrecording_codec=99\n"
+-                       "recording_encoder=-1\nrecording_bitrate=0\ndiagnostics=invalid\n";
++                       "recording_encoder=-1\nrecording_bitrate=0\ndiagnostics=invalid\nlanguage=7\n";
+         }
+         require(ap::load_settings(path).ui == ap::UiPreferences{}, "invalid preferences accepted");
+         require(!ap::save_settings(wanted, {}), "empty path accepted");
+diff --git a/tools/test_shutdown.cpp b/tools/test_shutdown.cpp
+index 4bdf19b..f7658ce 100644
+--- a/tools/test_shutdown.cpp
++++ b/tools/test_shutdown.cpp
+@@ -12,6 +12,7 @@
+ #include <chrono>
+ #include <cstdlib>
+ #include <iostream>
++#include <string>
+ #include <thread>
+ #include <vector>
+ #if defined(_WIN32)
+@@ -289,6 +290,31 @@ void test_mdns() {
+     std::cout << "PASS: mDNS register/deregister and repeated stop (check DNS callback statuses above)\n";
+ }
+ }
++void test_body_limit() {
++    ap::airplay::Request request;
++    require(request.content_length() == 0, "missing Content-Length is an empty body");
++    request.headers["content-length"] = "68";
++    require(request.content_length() == 68, "plain Content-Length is accepted");
++    for (const char* bad : {"-1", "99999999999999999999", "12abc", "0x10"}) {
++        request.headers["content-length"] = bad;
++        require(request.content_length() > ap::airplay::kMaxBodySize, "malformed or huge Content-Length is rejected");
++    }
++
++    std::atomic<int> rejected{0};
++    ap::net::TcpServer server;
++    require(server.start(0, [&](ap::net::ClientSocket client) {
++        ap::airplay::RequestReader reader(client.cancelled);
++        ap::airplay::Request req;
++        if (!reader.read(client.fd, req)) ++rejected;
++    }), "body limit server");
++    const socket_t client = connect_to(server.port());
++    const std::string oversized = "POST /fp-setup RTSP/1.0\r\nContent-Length: 4294967295\r\n\r\n";
++    require(ap::net::send_all(client, oversized.data(), static_cast<int>(oversized.size())) > 0, "send oversized request");
++    wait_for([&] { return rejected.load() == 1; });
++    check_closed(client);
++    server.stop();
++}
++
+ int main(int argc, char** argv) {
+     require(ap::net::global_init(), "Winsock");
+     ap::set_log_enabled(true);
+@@ -298,6 +324,7 @@ int main(int argc, char** argv) {
+     test_keepalive_and_reset();
+     test_completed_workers();
+     test_blocked_send();
++    test_body_limit();
+     if (argc > 1 && std::string(argv[1]) == "--mdns") test_mdns();
+ #if defined(_WIN32)
+     if (argc > 1 && std::string(argv[1]) == "--dacp") test_dacp();
