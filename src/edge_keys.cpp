@@ -83,8 +83,14 @@ const KeyName* key_by_vk(uint16_t vk) {
     return nullptr;
 }
 
-std::vector<KeyRule> default_rules() {
-    return {
+KeyConfig keyboard_layout() { return KeyConfig{}; }
+
+KeyConfig mac_layout() {
+    KeyConfig k;
+    k.command = ModTarget::Ctrl;
+    k.option = ModTarget::Alt;
+    k.control = ModTarget::Win;
+    k.rules = {
         // App switching and closing, the Mac way.
         {true, kCommand, 48, kAlt, 0x09},             // Command-Tab -> Alt-Tab
         {true, kCommand, 12, kAlt, 0x73},             // Command-Q -> Alt-F4
@@ -97,6 +103,7 @@ std::vector<KeyRule> default_rules() {
         {true, kOption, 124, kCtrl, 0x27},            // Option-Right -> Ctrl-Right
         {true, kOption, 51, kCtrl, 0x08},             // Option-Backspace -> Ctrl-Backspace
     };
+    return k;
 }
 
 std::string rule_to_text(const KeyRule& r) {

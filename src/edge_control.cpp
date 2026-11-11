@@ -487,8 +487,7 @@ struct EdgeControl::Impl {
 
     void load() {
         cfg = Config{};
-        cfg.keys.rules = default_rules();
-        bool have_id = false, custom_rules = false;
+        bool have_id = false, custom_rules = false, current_keys = false;
         std::vector<KeyRule> rules;
         std::ifstream in(config_path());
         std::string line;
@@ -506,9 +505,14 @@ struct EdgeControl::Impl {
                 (k == "command" ? cfg.keys.command : k == "option" ? cfg.keys.option : cfg.keys.control) = ModTarget(n);
             }
             else if (k == "rules") custom_rules = true;
+            else if (k == "keys_version") current_keys = v == "2";
             else if (k == "rule") { KeyRule r; if (rule_from_text(v, r)) rules.push_back(r); }
         }
         if (custom_rules) cfg.keys.rules = rules;
+        else if (!current_keys) cfg.keys.rules = mac_layout().rules;
+        // Settings written before keyboard_layout() became the default: an
+        // untouched Mac-habit setup moves to the new default.
+        if (!current_keys && cfg.keys == mac_layout()) { cfg.keys = keyboard_layout(); save_config(); }
         if (!have_id) { random_bytes(pc_id.data(), pc_id.size()); save_config(); }
 
         std::ifstream din(devices_path(), std::ios::binary);
@@ -544,8 +548,9 @@ struct EdgeControl::Impl {
             << "pc_id=" << hex(pc_id.data(), pc_id.size()) << '\n'
             << "command=" << int(cfg.keys.command) << '\n'
             << "option=" << int(cfg.keys.option) << '\n'
-            << "control=" << int(cfg.keys.control) << '\n';
-        if (cfg.keys.rules != default_rules()) {
+            << "control=" << int(cfg.keys.control) << '\n'
+            << "keys_version=2\n";
+        if (!cfg.keys.rules.empty()) {
             out << "rules=custom\n";
             for (const auto& r : cfg.keys.rules) out << "rule=" << rule_to_text(r) << '\n';
         }

@@ -136,7 +136,7 @@ void draw_edge_page(EdgeControl& edge, ImFont* bold_font, ImFont* small_font, fl
     hint(small_font, tr("Text and images, in both directions, while the Mac is connected. Content that password managers mark as private is never shared."));
 
     heading(bold_font, tr("Modifier keys"));
-    hint(small_font, tr("What the Mac's modifier keys do on this PC. Left and right keys stay apart, so Right Option acts as Right Alt."));
+    hint(small_font, tr("What the Mac's modifier keys do on this PC. The default follows a Windows-labelled keyboard: its Win key (Command on the Mac) is Win, Alt (Option) is Alt and Ctrl (Control) is Ctrl. Left and right keys stay apart."));
     ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Command"); ImGui::SameLine(110);
     changed |= target_combo("##command", cfg.keys.command);
     ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Option"); ImGui::SameLine(110);
@@ -188,9 +188,13 @@ void draw_edge_page(EdgeControl& edge, ImFont* bold_font, ImFont* small_font, fl
         changed = true;
     }
     ImGui::SameLine();
-    if (ui_draw::text_button(tr("Restore defaults"), ImVec2(150, 32))) {
-        cfg.keys = KeyConfig{};
-        cfg.keys.rules = default_rules();
+    if (ui_draw::text_button(tr("As labelled (default)"), ImVec2(170, 32))) {
+        cfg.keys = keyboard_layout();
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ui_draw::text_button(tr("Mac habits"), ImVec2(130, 32))) {
+        cfg.keys = mac_layout();
         changed = true;
     }
     ImGui::Dummy(ImVec2(0, 24));

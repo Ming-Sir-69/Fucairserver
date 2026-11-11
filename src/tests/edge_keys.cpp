@@ -28,8 +28,22 @@ struct Recorder {
 
 int main() {
     try {
-        KeyConfig config;
-        config.rules = default_rules();
+        // Mac habits on an Apple keyboard.
+        const KeyConfig config = mac_layout();
+
+        {   // Default: keys do what a Windows-labelled keyboard says; no rewriting.
+            Recorder r; r.mapper.set_config(keyboard_layout());
+            r.mapper.key(59, true); r.mapper.key(8, true); r.mapper.key(8, false); r.mapper.key(59, false);
+            require(r.take() == "+A2 +43 -43 -A2", "The Ctrl key (Control) must be Ctrl");
+            r.mapper.key(55, true); r.mapper.key(2, true); r.mapper.key(2, false); r.mapper.key(55, false);
+            require(r.take() == "+5B +44 -44 -5B", "The Win key (Command) must be Win");
+            r.mapper.key(58, true); r.mapper.key(48, true); r.mapper.key(48, false); r.mapper.key(58, false);
+            require(r.take() == "+A4 +09 -09 -A4", "The Alt key (Option) must give a plain Alt-Tab");
+            r.mapper.key(61, true); r.mapper.key(49, true); r.mapper.key(49, false); r.mapper.key(61, false);
+            require(r.take() == "+A5 +20 -20 -A5", "Right Alt-Space must reach the PC (voice input)");
+            r.mapper.key(55, true); r.mapper.key(123, true); r.mapper.key(123, false); r.mapper.key(55, false);
+            require(r.take() == "+5B +25 -25 -5B", "No Mac rules apply by default");
+        }
 
         {   // Plain keys and the default modifier mapping.
             Recorder r; r.mapper.set_config(config);
@@ -101,7 +115,7 @@ int main() {
         }
         {   // Settings text round trip and validation.
             KeyRule rule;
-            require(rule_from_text(rule_to_text(default_rules()[0]), rule) && rule == default_rules()[0], "Rules must round-trip");
+            require(rule_from_text(rule_to_text(config.rules[0]), rule) && rule == config.rules[0], "Rules must round-trip");
             require(!rule_from_text("1,1,999,2,9", rule), "Unknown Mac keys must be rejected");
             require(!rule_from_text("1,1,48,0,0", rule), "A rule must produce something");
         }

@@ -26,6 +26,7 @@ struct Config {
     var scale = 1.0              // Mac points to PC pixels
     var receiverName = ""        // the PC's AirPlay name, for mirroring detection
     var captureInput = true      // route Mac text input to the PC while it has control
+    var debugKeys = false        // log every key event seen while the PC has control
 }
 
 func loadConfig() -> Config {
@@ -43,6 +44,7 @@ func loadConfig() -> Config {
         case "scale": c.scale = Double(kv[1]) ?? c.scale
         case "receiver", "display": c.receiverName = kv[1]
         case "capture_input": c.captureInput = kv[1] != "0"
+        case "debug_keys": c.debugKeys = kv[1] == "1"
         default: break
         }
     }
@@ -51,7 +53,8 @@ func loadConfig() -> Config {
 
 func saveConfig(_ c: Config) {
     let text = "pc_id=\(c.pcId)\npc_name=\(c.pcName)\nhost=\(c.host)\nport=\(c.port)\nside=\(c.side)\n" +
-               "scale=\(c.scale)\nreceiver=\(c.receiverName)\ncapture_input=\(c.captureInput ? 1 : 0)\n"
+               "scale=\(c.scale)\nreceiver=\(c.receiverName)\ncapture_input=\(c.captureInput ? 1 : 0)\n" +
+               (c.debugKeys ? "debug_keys=1\n" : "")
     try? text.write(toFile: confPath, atomically: true, encoding: .utf8)
 }
 
@@ -526,6 +529,12 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
         if isMove && tryEnter(event.location, event.getDoubleValueField(.mouseEventDeltaX)) { return nil }
         return Unmanaged.passUnretained(event)
     }
+    if config.debugKeys, !isMove, type != .scrollWheel {
+        var detail = "type=\(type.rawValue) code=\(event.getIntegerValueField(.keyboardEventKeycode)) flags=0x" +
+                     String(event.flags.rawValue, radix: 16)
+        if type.rawValue == 14, let ns = NSEvent(cgEvent: event) { detail += " subtype=\(ns.subtype.rawValue) data1=0x" + String(ns.data1, radix: 16) }
+        log("key " + detail)
+    }
     switch type {
     case _ where isMove:
         residual.x += event.getDoubleValueField(.mouseEventDeltaX) * config.scale
@@ -569,6 +578,32 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
         return Unmanaged.passUnretained(event)
     }
     return nil
+}
+
+// MARK: - Diagnostics
+
+// With debug_keys=1: raw HID reports for the eight modifier keys only (no
+// letters), from every keyboard, before macOS processes them. Shows whether a
+// key leaves the keyboard at all when the event tap never sees it.
+var hidManager: IOHIDManager?
+
+func startModifierDiagnostics() {
+    guard config.debugKeys, hidManager == nil else { return }
+    let m = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    IOHIDManagerSetDeviceMatching(m, [kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
+                                      kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard] as CFDictionary)
+    IOHIDManagerRegisterInputValueCallback(m, { _, _, _, value in
+        let element = IOHIDValueGetElement(value)
+        let page = IOHIDElementGetUsagePage(element), usage = IOHIDElementGetUsage(element)
+        guard page == kHIDPage_KeyboardOrKeypad, (0xE0...0xE7).contains(usage) else { return }
+        let device = IOHIDElementGetDevice(element)
+        let name = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "?"
+        log("hid modifier usage=0x\(String(usage, radix: 16)) value=\(IOHIDValueGetIntegerValue(value)) device=\(name)")
+    }, nil)
+    IOHIDManagerScheduleWithRunLoop(m, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    let r = IOHIDManagerOpen(m, IOOptionBits(kIOHIDOptionsTypeNone))
+    log("modifier diagnostics \(r == kIOReturnSuccess ? "on" : "failed \(r)")")
+    hidManager = m
 }
 
 // MARK: - Clipboard
@@ -710,6 +745,7 @@ final class App: NSObject, NSApplicationDelegate {
         CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, port, 0), .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         log("event tap ready")
+        startModifierDiagnostics()
         refresh()
     }
 

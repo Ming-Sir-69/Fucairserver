@@ -34,15 +34,22 @@ struct KeyRule {
     }
 };
 
+// Defaults follow the key labels of a Windows-labelled keyboard used with the
+// Mac (its Win key sends Command, Alt sends Option, Ctrl sends Control), so
+// each key does on the PC what it says, and the PC keeps its own shortcuts.
 struct KeyConfig {
-    ModTarget command = ModTarget::Ctrl;
+    ModTarget command = ModTarget::Win;
     ModTarget option = ModTarget::Alt;
-    ModTarget control = ModTarget::Win;
+    ModTarget control = ModTarget::Ctrl;
     std::vector<KeyRule> rules;
     bool operator==(const KeyConfig& o) const { return command == o.command && option == o.option && control == o.control && rules == o.rules; }
 };
 
-std::vector<KeyRule> default_rules();
+// As printed on the keys; no shortcut rewriting. The default.
+KeyConfig keyboard_layout();
+// For an Apple keyboard and Mac habits: Command acts as Ctrl, plus rules such
+// as Command-Tab for Alt-Tab and Command-Left for Home.
+KeyConfig mac_layout();
 
 struct KeyName {
     const char* name;   // English; translated through tr()

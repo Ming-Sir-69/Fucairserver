@@ -36,12 +36,19 @@ FucairEdge，在 Mac 上执行 `mac/fucair-edge/install.sh` 构建并安装，�
 使用 TCP 7021 端口。“键鼠跨屏”页面可以开关整个功能，逐台设置已配对的 Mac
 是否可以控制、是否共享剪贴板，或者移除它。
 
-控制电脑时，Mac 的 Command、Option、Control 默认分别对应电脑的 Ctrl、Alt、
-Win 键，左右键分开对应，例如右 Option 就是右 Alt；可在页面里改。快捷键映射把
-Mac 习惯转成 Windows 操作，例如 Command-Tab 切换窗口、Command-Q 关闭程序、
-Command/Option 加方向键跳行首行尾或按词移动，可以增删和恢复默认。
-音量和播放键也会发到电脑。控制电脑期间，Mac 输入法产生的文字（例如 Mac 上的
-语音输入）会输入到电脑，不会落到 Mac 的程序里；不需要时可在 FucairEdge 菜单关闭。
+控制电脑时，默认按 Windows 键帽标注对应：标着 Win 的键（在 Mac 上是 Command）
+就是 Win，Alt（Option）就是 Alt，Ctrl（Control）就是 Ctrl，左右键分开对应，
+例如右 Alt 加空格就是电脑上的右 Alt 加空格。电脑保留自己的快捷键，不做改写。
+用苹果键盘、习惯 Mac 操作的，可在页面里选“Mac 习惯”：Command 当 Ctrl 用，
+并把 Command-Tab、Command-Q、Command/Option 加方向键等转成对应的 Windows 操作。
+映射可以逐条增删。音量和播放键也会发到电脑。
+
+焦点跟随指针：指针在电脑上时，Mac 输入法产生的文字（例如 Mac 上的语音输入）
+会输入到电脑；指针回到 Mac 后，电脑上产生的文字（例如电脑的语音输入）会输入到
+Mac。动一下电脑自己的鼠标，焦点就回到电脑原来的窗口。两个方向分别可在
+FucairEdge 菜单和“键鼠跨屏”页面关闭。排查按键问题时，在 Mac 的
+`~/.fucairserver/edge.conf` 加一行 `debug_keys=1` 并重启 FucairEdge，
+`edge.log` 会记录控制电脑期间的按键事件和修饰键的原始硬件信号；用完删除这一行。
 在 Mac 上按 Control-Option-Command-Esc 可随时收回指针。Mac 向这台电脑镜像
 屏幕时键鼠跨屏自动暂停。
 
