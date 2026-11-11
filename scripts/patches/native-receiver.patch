@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index efb9bb1..7433336 100644
+index efb9bb1..2a19bba 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -12,6 +12,9 @@ if(MSVC)
@@ -12,7 +12,7 @@ index efb9bb1..7433336 100644
  
  # ---- libplist (required) ------------------------------------------------------
  # UxPlay uses libplist to serialise the /info, ANNOUNCE and other RTSP bodies.
-@@ -341,6 +344,24 @@ add_executable(airplay-windows
+@@ -341,6 +344,30 @@ add_executable(airplay-windows
  )
  
  target_include_directories(airplay-windows PRIVATE src)
@@ -21,6 +21,12 @@ index efb9bb1..7433336 100644
 +target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/windows_identity.cpp")
 +target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/ime_text_input.cpp")
 +target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/ui_text.cpp")
++if(WIN32)
++    target_sources(airplay-windows PRIVATE
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/edge_keys.cpp"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/edge_control.cpp"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/edge_ui.cpp")
++endif()
 +if(WIN32)
 +    enable_language(RC)
 +    target_sources(airplay-windows PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src/Fucairserver.rc")
@@ -37,16 +43,16 @@ index efb9bb1..7433336 100644
  target_link_libraries(airplay-windows PRIVATE OpenSSL::Crypto ${FFMPEG_TARGETS} ${SDL2_TARGET} ${SDL2_TTF_TARGET} imgui)
  if(_use_gst AND GSTREAMER_FOUND)
      target_link_libraries(airplay-windows PRIVATE PkgConfig::GSTREAMER)
-@@ -418,7 +439,7 @@ if(WIN32)
+@@ -418,7 +445,7 @@ if(WIN32)
      # VideoRenderer window.
      target_link_libraries(airplay-windows PRIVATE
          ws2_32 iphlpapi dnsapi dwmapi d3d11
 -        setupapi shell32 ole32 oleaut32)   # USB, Lockdown lookup and firewall COM API
-+        setupapi shell32 ole32 oleaut32 uuid)   # USB, Lockdown lookup and firewall COM API
++        setupapi shell32 ole32 oleaut32 uuid bcrypt crypt32 windowscodecs)   # USB, Lockdown lookup and firewall COM API
  
      # Released as a GUI app so no empty console window pops up when
      # launched from File Explorer. main() stays the entry point — the
-@@ -457,7 +478,7 @@ endif()
+@@ -457,7 +484,7 @@ endif()
  # system GStreamer install put them and let gst_init() find them via
  # its registered plugin path — practically: as long as the user has
  # GStreamer's bin/ on PATH the plugins resolve at startup.
@@ -55,7 +61,7 @@ index efb9bb1..7433336 100644
      add_custom_command(TARGET airplay-windows POST_BUILD
          COMMAND ${CMAKE_COMMAND} -E copy_if_different
              $<TARGET_RUNTIME_DLLS:airplay-windows>
-@@ -485,10 +506,17 @@ endif()
+@@ -485,10 +512,20 @@ endif()
  # Focused regression tests for receiver disconnect and shutdown.
  option(BUILD_NETWORK_TESTS "Build socket shutdown regression tests" OFF)
  if(BUILD_NETWORK_TESTS)
@@ -66,6 +72,9 @@ index efb9bb1..7433336 100644
 +    add_executable(test-ui-text "${FUCAIRSERVER_PROJECT_ROOT}/src/tests/ui_text.cpp"
 +        "${FUCAIRSERVER_PROJECT_ROOT}/src/ui_text.cpp")
 +    target_include_directories(test-ui-text PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src")
++    add_executable(test-edge-keys "${FUCAIRSERVER_PROJECT_ROOT}/src/tests/edge_keys.cpp"
++        "${FUCAIRSERVER_PROJECT_ROOT}/src/edge_keys.cpp")
++    target_include_directories(test-edge-keys PRIVATE "${FUCAIRSERVER_PROJECT_ROOT}/src")
      add_executable(test-firewall tools/test_firewall.cpp src/platform/firewall.cpp)
      target_include_directories(test-firewall PRIVATE src)
      if(WIN32)
@@ -74,12 +83,13 @@ index efb9bb1..7433336 100644
      endif()
      add_executable(test-settings tools/test_settings.cpp src/settings.cpp src/log.cpp)
      target_include_directories(test-settings PRIVATE src)
-@@ -515,6 +543,8 @@ if(BUILD_NETWORK_TESTS)
+@@ -515,6 +552,9 @@ if(BUILD_NETWORK_TESTS)
          target_link_libraries(test-shutdown PRIVATE Threads::Threads)
      endif()
      enable_testing()
 +    add_test(NAME ime-input COMMAND test-ime-input)
 +    add_test(NAME ui-text COMMAND test-ui-text)
++    add_test(NAME edge-keys COMMAND test-edge-keys)
      add_test(NAME firewall COMMAND test-firewall)
      add_test(NAME settings COMMAND test-settings)
      add_test(NAME socket-shutdown COMMAND test-shutdown)
@@ -402,7 +412,7 @@ index 414eda3..213ec1d 100644
  
  namespace ap::crypto {
 diff --git a/src/main.cpp b/src/main.cpp
-index 71c0f07..4bdec9e 100644
+index 71c0f07..efab1b8 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -1,4 +1,5 @@
@@ -412,7 +422,7 @@ index 71c0f07..4bdec9e 100644
  //
  // Responsibilities of main():
  //   1. Initialise Winsock (net::global_init).
-@@ -9,6 +10,8 @@
+@@ -9,33 +10,111 @@
  
  #include "airplay/hls_local_server.h"
  #include "airplay/live_settings.h"
@@ -421,7 +431,12 @@ index 71c0f07..4bdec9e 100644
  #include "airplay/server.h"
  #include "video/hls_player.h"
  #include "crypto/identity.h"
-@@ -20,22 +23,97 @@
+ #include "log.h"
+ #include "mdns/mdns_service.h"
++#include "edge_control.h"
+ #include "net/socket.h"
+ #include "settings.h"
+ #include "platform/single_instance.h"
  #include "platform/firewall.h"
  #include "usb/usb_supervisor.h"
  #include "video/video_renderer.h"
@@ -519,7 +534,7 @@ index 71c0f07..4bdec9e 100644
  #if defined(_WIN32)
  BOOL WINAPI console_handler(DWORD type) {
      if (type == CTRL_C_EVENT || type == CTRL_CLOSE_EVENT) {
-@@ -60,7 +138,7 @@ void signal_handler(int) { g_stop = true; }
+@@ -60,7 +139,7 @@ void signal_handler(int) { g_stop = true; }
  // an opt-in experimental path.
  ap::airplay::DeviceContext build_device_context(bool hls_playback) {
      ap::airplay::DeviceContext ctx;
@@ -528,7 +543,7 @@ index 71c0f07..4bdec9e 100644
      ctx.deviceid = ap::net::primary_mac();
      ctx.model    = "AppleTV3,2";
      ctx.pi       = "b08f5a79-db29-4384-b456-a4784d9e6055";
-@@ -78,34 +156,124 @@ ap::airplay::DeviceContext build_device_context(bool hls_playback) {
+@@ -78,34 +157,124 @@ ap::airplay::DeviceContext build_device_context(bool hls_playback) {
  } // namespace
  
  int main(int argc, char** argv) {
@@ -671,7 +686,7 @@ index 71c0f07..4bdec9e 100644
  
  #if defined(_WIN32)
      // We're a /SUBSYSTEM:WINDOWS binary so no console pops up by
-@@ -123,6 +291,7 @@ int main(int argc, char** argv) {
+@@ -123,6 +292,7 @@ int main(int argc, char** argv) {
  #endif
  
      auto saved = ap::load_settings();
@@ -679,7 +694,7 @@ index 71c0f07..4bdec9e 100644
      if (saved.mirror_width == 0 || saved.mirror_height == 0) {
          saved.mirror_width = 2560;
          saved.mirror_height = 1440;
-@@ -158,17 +327,17 @@ int main(int argc, char** argv) {
+@@ -158,17 +328,17 @@ int main(int argc, char** argv) {
      bool mirror_hwaccel = saved.mirror_hwaccel;
      int  mirror_w = saved.mirror_width;
      int  mirror_h = saved.mirror_height;
@@ -701,7 +716,7 @@ index 71c0f07..4bdec9e 100644
              const auto x = val.find_first_of("xX*");
              if (x != std::string::npos) {
                  try {
-@@ -190,28 +359,9 @@ int main(int argc, char** argv) {
+@@ -190,28 +360,9 @@ int main(int argc, char** argv) {
          } else if (arg == "--log" || arg == "--verbose") {
              // Already handled in the pre-init scan above; consume so
              // future unknown-arg paths don't trip on it.
@@ -733,7 +748,7 @@ index 71c0f07..4bdec9e 100644
          }
      }
  
-@@ -242,6 +392,9 @@ int main(int argc, char** argv) {
+@@ -242,6 +393,9 @@ int main(int argc, char** argv) {
      live_settings.fullscreen.store(saved.fullscreen);
      live_settings.chromeless.store(saved.chromeless);
      live_settings.video_rotation.store(saved.video_rotation);
@@ -743,7 +758,7 @@ index 71c0f07..4bdec9e 100644
      live_settings.set_ui_preferences(saved.ui);
      ctx.live = &live_settings;
      LOG_INFO << "AirPlay Streaming HLS path: "
-@@ -250,7 +403,21 @@ int main(int argc, char** argv) {
+@@ -250,7 +404,21 @@ int main(int argc, char** argv) {
  
      // Load (or create) the persistent Ed25519 identity. iOS caches receivers
      // by pk — keeping a stable keypair avoids re-pairing on every launch.
@@ -766,7 +781,7 @@ index 71c0f07..4bdec9e 100644
      if (!identity) {
          LOG_ERROR << "failed to initialise identity — aborting";
          ap::net::global_shutdown();
-@@ -259,7 +426,7 @@ int main(int argc, char** argv) {
+@@ -259,7 +427,7 @@ int main(int argc, char** argv) {
      ctx.public_key = identity->public_key();
      ctx.identity   = identity.get();
  
@@ -775,16 +790,24 @@ index 71c0f07..4bdec9e 100644
      LOG_INFO << "name="     << ctx.name;
      LOG_INFO << "deviceid=" << ctx.deviceid;
      const std::string local_ip   = ap::net::primary_ipv4();
-@@ -274,7 +441,7 @@ int main(int argc, char** argv) {
+@@ -272,9 +440,15 @@ int main(int argc, char** argv) {
+ 
+     // Start the SDL2 renderer window upfront. Streams will push decoded
      // frames once an iPhone connects.
++    // Keyboard and mouse from a paired Mac, plus clipboard sharing.
++    fucairserver::edge::EdgeControl edge;
++    edge.set_receiver_name(saved.receiver_name);
++    const bool edge_running = edge.start(ap::settings_path().parent_path());
++
      ap::video::VideoRenderer renderer;
      renderer.set_live_settings(&live_settings);
 -    if (!renderer.start("AirPlay-Windows")) {
++    renderer.set_edge_control(&edge);
 +    if (!renderer.start("Fucairserver")) {
          LOG_WARN << "VideoRenderer could not start — running headless";
      }
      // Prefer the v4 address on the idle screen (shorter, more familiar),
-@@ -290,12 +457,14 @@ int main(int argc, char** argv) {
+@@ -290,12 +464,14 @@ int main(int argc, char** argv) {
      if (hls_playback) ctx.hls_player = &hls_player;
  
      ap::airplay::Server server;
@@ -800,7 +823,15 @@ index 71c0f07..4bdec9e 100644
      // Keep the render thread available while workers finish GPU/audio teardown.
      std::atomic<bool> disconnect_requested{false};
      renderer.set_disconnect_handler([&disconnect_requested]() {
-@@ -342,11 +511,31 @@ int main(int argc, char** argv) {
+@@ -326,6 +502,7 @@ int main(int argc, char** argv) {
+     }
+ 
+     ap::mdns::MdnsService mdns;
++    if (edge_running) mdns.set_edge_service(edge.port(), edge.pc_id());
+     if (!mdns.start(ctx, server.port())) {
+         LOG_WARN << "mDNS not available — receiver won't auto-appear on iOS";
+     }
+@@ -342,11 +519,32 @@ int main(int argc, char** argv) {
      auto last_saved_settings = ap::snapshot(live_settings);
      auto observed_settings = last_saved_settings;
      auto settings_changed_at = std::chrono::steady_clock::now();
@@ -811,6 +842,7 @@ index 71c0f07..4bdec9e 100644
          if (instance.activation_requested()) renderer.request_show();
  #endif
          const auto receiver_name = live_settings.receiver_name();
++        edge.set_receiver_name(receiver_name);
 +        const bool play_audio = live_settings.play_audio.load();
 +        ap::audio::SdlAudioOutput::set_local_gain(
 +            !play_audio || live_settings.output_muted.load()
@@ -833,8 +865,16 @@ index 71c0f07..4bdec9e 100644
          if (receiver_name != ctx.name) {
              mdns.stop();
              ctx.name = receiver_name;
+@@ -390,6 +588,7 @@ int main(int argc, char** argv) {
+     // Withdraw discovery and interrupt sessions before stopping peripherals.
+     server.stop();
+     mdns.stop();
++    edge.stop();
+     usb_supervisor.stop();
+     hls_player.stop();
+     hls_server.stop();
 diff --git a/src/mdns/mdns_service.cpp b/src/mdns/mdns_service.cpp
-index ff63e26..0523e1c 100644
+index ff63e26..00ffe31 100644
 --- a/src/mdns/mdns_service.cpp
 +++ b/src/mdns/mdns_service.cpp
 @@ -1,5 +1,6 @@
@@ -1025,16 +1065,19 @@ index ff63e26..0523e1c 100644
  } // namespace
  
  // One registered service (either _airplay._tcp or _raop._tcp). Owns the
-@@ -75,6 +250,8 @@ struct RegisteredService {
+@@ -75,6 +250,11 @@ struct RegisteredService {
  struct MdnsService::Impl {
      std::shared_ptr<RegisteredService> airplay = std::make_shared<RegisteredService>();
      std::shared_ptr<RegisteredService> raop = std::make_shared<RegisteredService>();
++    std::shared_ptr<RegisteredService> edge = std::make_shared<RegisteredService>();
++    uint16_t edge_port = 0;
++    std::string edge_id;
 +    std::string advertised_ipv4;
 +    HostResponder host_responder;
  
      static void WINAPI on_complete(DWORD status, PVOID context,
                                     PDNS_SERVICE_INSTANCE inst) {
-@@ -96,6 +273,11 @@ struct MdnsService::Impl {
+@@ -96,6 +276,11 @@ struct MdnsService::Impl {
      bool register_service(const std::shared_ptr<RegisteredService>& service,
                            uint16_t port) {
          auto& s = *service;
@@ -1046,7 +1089,7 @@ index ff63e26..0523e1c 100644
          s.fill_ptrs();
          s.instance = {};
          s.instance.pszInstanceName = s.instance_name.data();
-@@ -162,6 +344,28 @@ struct MdnsService::Impl {
+@@ -162,6 +347,28 @@ struct MdnsService::Impl {
          }
          std::wstring local_host = std::wstring(host) + L".local";
  
@@ -1075,18 +1118,44 @@ index ff63e26..0523e1c 100644
          // Hex-encode the Ed25519 public key for the `pk` TXT value (64
          // chars for 32 bytes). iOS uses it to match the receiver
          // advertised over mDNS with the one it later pair-verifies.
-@@ -219,6 +423,7 @@ struct MdnsService::Impl {
+@@ -213,12 +420,24 @@ struct MdnsService::Impl {
+             LOG_WARN << "_raop._tcp registration failed; mirroring may still be offered";
+         }
+ 
++        // ---- _fucair-edge._tcp ----------------------------------------------
++        if (edge_port) {
++            edge->host_name     = local_host;
++            edge->instance_name = widen(ctx.name) + L"._fucair-edge._tcp.local";
++            edge->keys          = { L"id" };
++            edge->values        = { widen(edge_id) };
++            if (!register_service(edge, edge_port))
++                LOG_WARN << "_fucair-edge._tcp registration failed; Macs can still use a saved address";
++        }
++
+         return true;
+     }
+ 
      void stop() {
          unregister_service(airplay);
          unregister_service(raop);
++        unregister_service(edge);
 +        host_responder.stop();
      }
  };
  
-@@ -415,4 +620,12 @@ void MdnsService::stop() {
+@@ -415,4 +634,21 @@ void MdnsService::stop() {
      if (impl_) impl_->stop();
  }
  
++void MdnsService::set_edge_service(uint16_t port, const std::string& id) {
++#if defined(_WIN32)
++    impl_->edge_port = port;
++    impl_->edge_id = id;
++#else
++    (void)port; (void)id;
++#endif
++}
++
 +std::string MdnsService::advertised_ipv4() const {
 +#if defined(_WIN32)
 +    return impl_ ? impl_->advertised_ipv4 : std::string{};
@@ -1097,7 +1166,7 @@ index ff63e26..0523e1c 100644
 +
  } // namespace ap::mdns
 diff --git a/src/mdns/mdns_service.h b/src/mdns/mdns_service.h
-index 1ec20f0..571d555 100644
+index 1ec20f0..e0082eb 100644
 --- a/src/mdns/mdns_service.h
 +++ b/src/mdns/mdns_service.h
 @@ -4,6 +4,7 @@
@@ -1108,13 +1177,16 @@ index 1ec20f0..571d555 100644
  
  namespace ap::mdns {
  
-@@ -22,6 +23,9 @@ public:
+@@ -22,6 +23,12 @@ public:
  
      bool start(const ap::airplay::DeviceContext& ctx, uint16_t port);
      void stop();
 +    // LAN IPv4 bound to the advertised host, or empty when every local
 +    // address is published (IPv6-only network or non-Windows build).
 +    std::string advertised_ipv4() const;
++    // Also advertise Fucairserver edge control (_fucair-edge._tcp) on the
++    // same receiver-owned host. Call before start(); Windows only.
++    void set_edge_service(uint16_t port, const std::string& id);
  
  private:
      struct Impl;
@@ -1673,10 +1745,10 @@ index 5aa6783..02ada66 100644
  };
  
 diff --git a/src/video/receiver_ui.h b/src/video/receiver_ui.h
-index 42761e2..be943ac 100644
+index 42761e2..1bf3959 100644
 --- a/src/video/receiver_ui.h
 +++ b/src/video/receiver_ui.h
-@@ -6,11 +6,78 @@
+@@ -6,12 +6,79 @@
  
  // Vector controls use the same renderer as the video; no browser or bitmap icons.
  namespace ap::video::receiver_ui {
@@ -1685,6 +1757,7 @@ index 42761e2..be943ac 100644
 -constexpr ImU32 blue = IM_COL32(36, 103, 236, 255);
 -constexpr ImU32 line = IM_COL32(230, 232, 231, 255);
 -constexpr ImU32 paper = IM_COL32(245, 246, 244, 255);
+-enum class Icon { Cast, Home, Music, Screen, Settings, Phone, Previous, Next, Play, Pause, Close, Minimize, Maximize, Fullscreen, Record };
 +// The active palette; set_theme() swaps every entry between light and dark.
 +inline ImU32 ink = IM_COL32(32, 38, 41, 255);
 +inline ImU32 muted = IM_COL32(115, 123, 128, 255);
@@ -1757,10 +1830,23 @@ index 42761e2..be943ac 100644
 +}
 +
 +inline ImVec4 vec(ImU32 color) { return ImGui::ColorConvertU32ToFloat4(color); }
- enum class Icon { Cast, Home, Music, Screen, Settings, Phone, Previous, Next, Play, Pause, Close, Minimize, Maximize, Fullscreen, Record };
++enum class Icon { Cast, Home, Music, Screen, Settings, Phone, Previous, Next, Play, Pause, Close, Minimize, Maximize, Fullscreen, Record, Keyboard };
  
  inline void icon(ImDrawList* d, Icon kind, ImVec2 p, float size, ImU32 color) {
-@@ -80,11 +147,15 @@ inline bool icon_button(const char* id, Icon kind, const char* tooltip, float si
+     auto v = [&](float x, float y) { return ImVec2(p.x + x * size / 24, p.y + y * size / 24); };
+@@ -59,6 +126,11 @@ inline void icon(ImDrawList* d, Icon kind, ImVec2 p, float size, ImU32 color) {
+     case Icon::Fullscreen:
+         stroke(3,9,3,3); stroke(3,3,9,3); stroke(15,3,21,3); stroke(21,3,21,9);
+         stroke(3,15,3,21); stroke(3,21,9,21); stroke(15,21,21,21); stroke(21,21,21,15); break;
++    case Icon::Keyboard:
++        d->AddRect(v(2,6),v(22,18),color,2.5f,0,1.6f);
++        for (int i=0;i<4;++i) d->AddRectFilled(v(5.f+i*4,9),v(7.f+i*4,11),color);
++        for (int i=0;i<3;++i) d->AddRectFilled(v(7.f+i*4,12.5f),v(9.f+i*4,14.5f),color);
++        stroke(8,16,16,16); break;
+     case Icon::Record: d->AddCircleFilled(v(12,12),size*.18f,IM_COL32(205,92,92,255)); break;
+     }
+ }
+@@ -80,11 +152,15 @@ inline bool icon_button(const char* id, Icon kind, const char* tooltip, float si
      auto* d = ImGui::GetWindowDrawList();
      const bool hover = ImGui::IsItemHovered();
      const bool disabled = ImGui::GetStyle().Alpha < .9f;
@@ -1779,7 +1865,7 @@ index 42761e2..be943ac 100644
      icon(d,kind,ImVec2(p.x+(size-21)/2,p.y+(size-21)/2),21,color);
      if (hover && tooltip) ImGui::SetTooltip("%s",tooltip);
      return clicked;
-@@ -95,8 +166,11 @@ inline bool nav(const char* id, const char* label, Icon kind, bool selected, flo
+@@ -95,8 +171,11 @@ inline bool nav(const char* id, const char* label, Icon kind, bool selected, flo
      const bool clicked = surface(id, ImVec2(width,44));
      auto* d = ImGui::GetWindowDrawList();
      if (selected || ImGui::IsItemHovered())
@@ -1793,7 +1879,7 @@ index 42761e2..be943ac 100644
      icon(d,kind,ImVec2(p.x+12,p.y+12),20,color);
      d->AddText(font,font->FontSize,ImVec2(p.x+44,p.y+(44-font->FontSize)/2),color,label);
      return clicked;
-@@ -105,8 +179,8 @@ inline bool nav(const char* id, const char* label, Icon kind, bool selected, flo
+@@ -105,8 +184,8 @@ inline bool nav(const char* id, const char* label, Icon kind, bool selected, flo
  inline bool text_button(const char* label, ImVec2 size=ImVec2(0,34)) {
      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,1);
      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,7);
@@ -1872,20 +1958,21 @@ index 2e6ca89..60eb361 100644
  
      void submit(const AVFrame* frame);
 diff --git a/src/video/video_renderer.cpp b/src/video/video_renderer.cpp
-index 426a93a..27b5234 100644
+index 426a93a..1b6ebce 100644
 --- a/src/video/video_renderer.cpp
 +++ b/src/video/video_renderer.cpp
-@@ -5,6 +5,9 @@
+@@ -5,6 +5,10 @@
  #include "video/receiver_ui.h"
  #include "airplay/live_settings.h"
  #include "airplay/receiver_name.h"
 +#include "custom_identity.h"
 +#include "ime_text_input.h"
 +#include "ui_text.h"
++#include "edge_ui.h"
  #include "log.h"
  #include "platform/single_instance.h"
  #include "platform/firewall.h"
-@@ -23,6 +26,8 @@
+@@ -23,6 +27,8 @@
  #include <cstdio>
  #include <cstring>
  #include <filesystem>
@@ -1894,7 +1981,7 @@ index 426a93a..27b5234 100644
  #include <vector>
  
  #if defined(_WIN32)
-@@ -49,6 +54,13 @@ extern "C" {
+@@ -49,6 +55,13 @@ extern "C" {
  namespace ap::video {
  namespace {
  
@@ -1908,7 +1995,7 @@ index 426a93a..27b5234 100644
  // Keep the stage spacious; settings occupy a drawer only when requested.
  constexpr int kDefaultWinWidth  = 1220;
  constexpr int kDefaultWinHeight = 800;
-@@ -97,7 +109,7 @@ bool browse_recording_folder(SDL_Window* w, const std::string& initial,
+@@ -97,7 +110,7 @@ bool browse_recording_folder(SDL_Window* w, const std::string& initial,
          dialog->GetOptions(&options);
          dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
                             FOS_PATHMUSTEXIST);
@@ -1917,7 +2004,7 @@ index 426a93a..27b5234 100644
  
          try {
              const std::wstring initial_w =
-@@ -135,8 +147,25 @@ void enable_mica_backdrop(SDL_Window*) {}
+@@ -135,8 +148,25 @@ void enable_mica_backdrop(SDL_Window*) {}
  #endif
  
  // Calm, light palette shared by the receiver views and settings drawer.
@@ -1945,7 +2032,7 @@ index 426a93a..27b5234 100644
      auto& s = ImGui::GetStyle();
      s.WindowRounding = 0;
      s.WindowBorderSize = 0;
-@@ -149,19 +178,27 @@ void apply_overlay_theme() {
+@@ -149,19 +179,27 @@ void apply_overlay_theme() {
      s.FramePadding = ImVec2(12, 8);
      s.ItemSpacing = ImVec2(10, 12);
      auto* c = s.Colors;
@@ -1983,7 +2070,7 @@ index 426a93a..27b5234 100644
  }
  
  void copy_plane(std::vector<unsigned char>& dst,
-@@ -597,6 +634,8 @@ void VideoRenderer::record_payload_bytes(std::size_t n) {
+@@ -597,6 +635,8 @@ void VideoRenderer::record_payload_bytes(std::size_t n) {
  
  void VideoRenderer::set_active_device(DeviceInfo info) {
      std::lock_guard<std::mutex> lock(device_mtx_);
@@ -1992,7 +2079,7 @@ index 426a93a..27b5234 100644
      device_     = std::move(info);
      has_device_ = true;
  }
-@@ -743,6 +782,19 @@ void VideoRenderer::push_frame_nv12(const uint8_t* y,  int y_stride,
+@@ -743,6 +783,19 @@ void VideoRenderer::push_frame_nv12(const uint8_t* y,  int y_stride,
  }
  
  void VideoRenderer::run(const std::string& title) {
@@ -2012,7 +2099,7 @@ index 426a93a..27b5234 100644
      if (SDL_Init(SDL_INIT_VIDEO) != 0) {
          LOG_ERROR << "SDL_Init failed: " << SDL_GetError();
          running_ = false;
-@@ -761,6 +813,8 @@ void VideoRenderer::run(const std::string& title) {
+@@ -761,6 +814,8 @@ void VideoRenderer::run(const std::string& title) {
  #endif
  
      auto preferences = live_settings_ ? live_settings_->ui_preferences() : ap::UiPreferences{};
@@ -2021,7 +2108,7 @@ index 426a93a..27b5234 100644
      int initial_x = SDL_WINDOWPOS_CENTERED, initial_y = SDL_WINDOWPOS_CENTERED;
      int initial_w = kDefaultWinWidth, initial_h = kDefaultWinHeight;
      if (preferences.window_placement_valid) {
-@@ -812,6 +866,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -812,6 +867,7 @@ void VideoRenderer::run(const std::string& title) {
          running_ = false;
          return;
      }
@@ -2029,7 +2116,7 @@ index 426a93a..27b5234 100644
      LOG_INFO << "VideoRenderer window up (" << kDefaultWinWidth
               << 'x' << kDefaultWinHeight << ", resizable)";
      SDL_SetWindowMinimumSize(window, 960, 720);
-@@ -842,23 +897,59 @@ void VideoRenderer::run(const std::string& title) {
+@@ -842,23 +898,59 @@ void VideoRenderer::run(const std::string& title) {
      IMGUI_CHECKVERSION();
      ImGui::CreateContext();
      ImGuiIO& io = ImGui::GetIO();
@@ -2097,7 +2184,7 @@ index 426a93a..27b5234 100644
      }
  #endif
      if (!io.FontDefault) io.FontDefault = io.Fonts->AddFontDefault();
-@@ -867,6 +958,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -867,6 +959,9 @@ void VideoRenderer::run(const std::string& title) {
      if (!heading_font) heading_font = io.FontDefault;
      if (!page_font) page_font = bold_font;
      if (!receiver_font) receiver_font = bold_font;
@@ -2107,7 +2194,7 @@ index 426a93a..27b5234 100644
      ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
      ImGui_ImplSDLRenderer2_Init(renderer);
  
-@@ -973,6 +1067,8 @@ void VideoRenderer::run(const std::string& title) {
+@@ -973,6 +1068,8 @@ void VideoRenderer::run(const std::string& title) {
      auto publish_preferences = [&]() {
          auto current = preferences;
          current.diagnostics = ui.diagnostics;
@@ -2116,7 +2203,7 @@ index 426a93a..27b5234 100644
          current.recording_directory = recording_dir.data();
          current.recording_codec = static_cast<int>(recording_options.codec);
          current.recording_encoder = static_cast<int>(recording_options.encoder);
-@@ -1009,6 +1105,14 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1009,6 +1106,14 @@ void VideoRenderer::run(const std::string& title) {
      bool custom_resolution = false;
      double settings_reset_notice_until = 0;
  
@@ -2131,7 +2218,7 @@ index 426a93a..27b5234 100644
      auto reset_all_settings = [&]() {
          if (!live_settings_) return;
          const ap::PersistentSettings defaults;
-@@ -1028,6 +1132,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1028,6 +1133,9 @@ void VideoRenderer::run(const std::string& title) {
          live_settings_->mirror_hwaccel.store(defaults.mirror_hwaccel);
          live_settings_->vsync_enabled.store(defaults.vsync_enabled);
          live_settings_->video_rotation.store(defaults.video_rotation);
@@ -2141,7 +2228,7 @@ index 426a93a..27b5234 100644
          live_settings_->fullscreen.store(defaults.fullscreen);
          live_settings_->chromeless.store(defaults.chromeless);
          preferences = defaults.ui;
-@@ -1036,6 +1143,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1036,6 +1144,9 @@ void VideoRenderer::run(const std::string& title) {
          std::snprintf(recording_dir.data(),recording_dir.size(),"%s",default_recording_dir.c_str());
          recording_options = VideoRecorder::Options{};
          ui.diagnostics = defaults.ui.diagnostics;
@@ -2151,7 +2238,7 @@ index 426a93a..27b5234 100644
          ui.chromeless = false;
          custom_resolution = false;
          prev_chromeless = false;
-@@ -1117,7 +1227,20 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1117,7 +1228,20 @@ void VideoRenderer::run(const std::string& title) {
      };
  
      ap::platform::FirewallMonitor firewall_monitor;
@@ -2172,7 +2259,7 @@ index 426a93a..27b5234 100644
          if (show_requested_.exchange(false)) {
              SDL_ShowWindow(window);
              if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
-@@ -1183,16 +1306,29 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1183,16 +1307,29 @@ void VideoRenderer::run(const std::string& title) {
              }
          }
  
@@ -2202,7 +2289,7 @@ index 426a93a..27b5234 100644
              const ImGuiIO& io_poll = ImGui::GetIO();
              // A focused panel captures navigation keys even when no field is
              // being edited. Keep receiver shortcuts global in that case;
-@@ -1208,10 +1344,11 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1208,10 +1345,11 @@ void VideoRenderer::run(const std::string& title) {
                  switch (e.key.keysym.sym) {
                      case SDLK_ESCAPE:
                          // ESC peels back layers in order:
@@ -2215,7 +2302,7 @@ index 426a93a..27b5234 100644
                          else { closed_ = true; running_ = false; }
                          break;
                      case SDLK_f:
-@@ -1406,7 +1543,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1406,7 +1544,7 @@ void VideoRenderer::run(const std::string& title) {
              make_text(fonts_small, t_idle_ip,
                        SDL_Color{180, 180, 180, 255},
                        idle_ip_tex,   idle_ip_w,   idle_ip_h);
@@ -2224,7 +2311,7 @@ index 426a93a..27b5234 100644
                        SDL_Color{150, 150, 150, 255},
                        idle_msg_tex,  idle_msg_w,  idle_msg_h);
          }
-@@ -1500,7 +1637,9 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1500,7 +1638,9 @@ void VideoRenderer::run(const std::string& title) {
          // then clip subsequent SDL draws to the stage rect via
          // viewport — the ImGui panels will paint over the cleared
          // sides afterwards.
@@ -2235,7 +2322,7 @@ index 426a93a..27b5234 100644
          SDL_RenderClear(renderer);
          const bool framed_video = !no_chrome && show_video;
          const SDL_Rect stage_rect{stage_x + (framed_video ? 42 : 0), stage_y + (framed_video ? 96 + firewall_offset : 0),
-@@ -1651,10 +1790,10 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1651,10 +1791,10 @@ void VideoRenderer::run(const std::string& title) {
              const ImVec2 p = ImGui::GetCursorScreenPos();
              const float width = ImGui::GetContentRegionAvail().x;
              auto* draw = ImGui::GetWindowDrawList();
@@ -2249,7 +2336,7 @@ index 426a93a..27b5234 100644
              ImGui::PushFont(small_font);
              ImGui::TextDisabled("%u:%02u",static_cast<unsigned>(elapsed/60000),static_cast<unsigned>((elapsed/1000)%60));
              char duration[32]; std::snprintf(duration,sizeof(duration),"%u:%02u",total/60000,(total/1000)%60);
-@@ -1668,17 +1807,17 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1668,17 +1808,17 @@ void VideoRenderer::run(const std::string& title) {
              const ImVec2 row = ImGui::GetCursorPos();
              ImGui::BeginDisabled(!ready || pending);
              ImGui::SetCursorPos(ImVec2(row.x,row.y+10.5f));
@@ -2273,7 +2360,16 @@ index 426a93a..27b5234 100644
              ImGui::PopFont();
          };
  
-@@ -1701,13 +1840,13 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1691,7 +1831,7 @@ void VideoRenderer::run(const std::string& title) {
+         // for AirPlay" ring stays drawn — it's part of the stage.
+         if (!no_chrome) {
+         if (has_active_dev && !ui.was_connected) ui.page = active_dev.kind == "Audio" ? 1 : 2;
+-        if (!has_active_dev && ui.was_connected) ui.page = 0;
++        if (!has_active_dev && ui.was_connected && ui.page != 3) ui.page = 0;
+         ui.was_connected = has_active_dev;
+         const char* receiver = receiver_name_buf.data();
+         const ImU32 ink = ui_draw::ink, muted = ui_draw::muted, line = ui_draw::line;
+@@ -1701,13 +1841,13 @@ void VideoRenderer::run(const std::string& title) {
          ImGui::Begin("##titlebar",nullptr,kPanelFlags|ImGuiWindowFlags_NoScrollbar);
          auto* title_draw = ImGui::GetWindowDrawList();
          ui_draw::icon(title_draw,ui_draw::Icon::Cast,ImVec2(20,12),20,ui_draw::blue);
@@ -2289,7 +2385,7 @@ index 426a93a..27b5234 100644
              ui_draw::icon(title_draw,kind,ImVec2(pos.x+14,pos.y+12),20,muted);
              return click;
          };
-@@ -1726,17 +1865,33 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1726,17 +1866,34 @@ void VideoRenderer::run(const std::string& title) {
          ImGui::Begin("##navigation",nullptr,kPanelFlags|ImGuiWindowFlags_NoScrollbar);
          auto* rail=ImGui::GetWindowDrawList();
          rail->AddLine(ImVec2(side_bar_w-1,toolbar_h),ImVec2(side_bar_w-1,fh-status_bar_h),line);
@@ -2302,6 +2398,7 @@ index 426a93a..27b5234 100644
 +        if (ui_draw::nav("##home",tr("Home"),ui_draw::Icon::Home,ui.page==0,162,ui.page==0?bold_font:io.FontDefault)) ui.page=0;
 +        if (ui_draw::nav("##music",tr("Music"),ui_draw::Icon::Music,ui.page==1,162,ui.page==1?bold_font:io.FontDefault)) ui.page=1;
 +        if (ui_draw::nav("##mirror",tr("Screen mirroring"),ui_draw::Icon::Screen,ui.page==2,162,ui.page==2?bold_font:io.FontDefault)) ui.page=2;
++        if (edge_ && ui_draw::nav("##edge",tr("Keyboard and mouse"),ui_draw::Icon::Keyboard,ui.page==3,162,ui.page==3?bold_font:io.FontDefault)) ui.page=3;
          ImGui::SetCursorPosY(fh-toolbar_h-status_bar_h-150);
 -        if (ui_draw::nav("##settings","Settings",ui_draw::Icon::Settings,ui.settings_open,162,io.FontDefault)) ui.settings_open=!ui.settings_open;
 +        if (ui_draw::nav("##settings",tr("Settings"),ui_draw::Icon::Settings,ui.settings_open,162,io.FontDefault)) ui.settings_open=!ui.settings_open;
@@ -2329,7 +2426,7 @@ index 426a93a..27b5234 100644
          ImGui::SetCursorPosX(25); ImGui::PushTextWrapPos(side_bar_w-15); ImGui::TextUnformatted(receiver); ImGui::PopTextWrapPos();
          ImGui::PopFont(); ImGui::End(); ImGui::PopStyleVar();
  
-@@ -1745,7 +1900,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1745,7 +1902,7 @@ void VideoRenderer::run(const std::string& title) {
          ImGui::SetNextWindowPos(ImVec2(static_cast<float>(stage_x),toolbar_h));
          ImGui::SetNextWindowSize(ImVec2(static_cast<float>(stage_w)-14,static_cast<float>(stage_h)));
          ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(42,0));
@@ -2338,7 +2435,7 @@ index 426a93a..27b5234 100644
          ImGui::Begin("##content",nullptr,kPanelFlags|(video_view ? ImGuiWindowFlags_NoBackground : 0));
          auto* draw=ImGui::GetWindowDrawList();
          ImVec2 origin=ImGui::GetWindowPos();
-@@ -1758,54 +1913,55 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1758,54 +1915,55 @@ void VideoRenderer::run(const std::string& title) {
          };
          auto decoding_note = [&](float bottom) {
              const bool gpu=live_settings_ && live_settings_->mirror_hwaccel.load();
@@ -2378,7 +2475,7 @@ index 426a93a..27b5234 100644
 +            if (ui_draw::text_button(tr("Disconnect"),ImVec2(108,34)) && disconnect_handler_) disconnect_handler_();
          } else {
 -            text_at(page_font,42,36,ink,ui.page==0 ? "Welcome home." : ui.page==1 ? "Your music on this PC." : "Your screen, live.");
-+            text_at(page_font,42,36,ink,tr(ui.page==0 ? "Welcome home." : ui.page==1 ? "Your music on this PC." : "Your screen, live."));
++            text_at(page_font,42,36,ink,tr(ui.page==0 ? "Welcome home." : ui.page==1 ? "Your music on this PC." : ui.page==3 ? "One keyboard and mouse." : "Your screen, live."));
              const float badge_x=stage_w-167.f;
              const bool firewall_attention=firewall_notice && !has_active_dev;
 -            draw->AddRectFilled(ImVec2(origin.x+badge_x,origin.y+36),ImVec2(origin.x+stage_w-42,origin.y+66),firewall_attention ? IM_COL32(255,247,227,255) : IM_COL32(233,243,236,255),15);
@@ -2419,7 +2516,7 @@ index 426a93a..27b5234 100644
                      firewall_monitor.allow_local_network();
                  ImGui::EndDisabled();
              }
-@@ -1816,15 +1972,15 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1816,15 +1974,15 @@ void VideoRenderer::run(const std::string& title) {
              const float cover_x=wide?42.f:(stage_w-cover_size)/2;
              const float cover_y=(wide?std::max(120.f,(stage_h-cover_size)*.45f):100.f)+firewall_offset;
              const ImVec2 tl(origin.x+cover_x,origin.y+cover_y),br(tl.x+cover_size,tl.y+cover_size);
@@ -2439,7 +2536,7 @@ index 426a93a..27b5234 100644
              auto track_line=[&](SDL_Texture* texture,int w,int h,float scale,ImU32 tint) {
                  if (!texture || w<=0 || h<=0) return;
                  const float fit=std::min(scale,(stage_w-tx-42)/w);
-@@ -1832,8 +1988,8 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1832,8 +1990,8 @@ void VideoRenderer::run(const std::string& title) {
                  ty+=h*fit+9;
              };
              track_line(title_tex,title_w,title_h,1,ink);
@@ -2450,7 +2547,7 @@ index 426a93a..27b5234 100644
              ImGui::SetCursorPos(ImVec2(tx,ty+23));
              ImGui::BeginChild("##music_transport",ImVec2(stage_w-tx-42,165),false);
              if (audio_control_handler_) draw_audio_controls();
-@@ -1841,19 +1997,19 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1841,19 +1999,21 @@ void VideoRenderer::run(const std::string& title) {
              if (wide) {
                  const float footer_y=std::max(stage_h-78.f,std::max(cover_y+cover_size,ty+188)+35);
                  draw->AddLine(ImVec2(origin.x+42,origin.y+footer_y),ImVec2(origin.x+stage_w-42,origin.y+footer_y),line);
@@ -2460,6 +2557,8 @@ index 426a93a..27b5234 100644
 +                text_at(small_font,67,footer_y+19,muted,tr("Playing from your device on this PC"));
                  ImGui::SetCursorPosY(footer_y+45); ImGui::Dummy(ImVec2(1,1));
              }
++        } else if (ui.page==3 && edge_) {
++            fucairserver::draw_edge_page(*edge_,bold_font,small_font,96.f+firewall_offset,width);
          } else if (video_view) {
              ImGui::SetCursorPos(ImVec2(42,stage_h-47.f));
              const bool recording=recorder_ && recorder_->status().recording;
@@ -2476,7 +2575,7 @@ index 426a93a..27b5234 100644
              const ImVec2 rotation_button=ImGui::GetItemRectMin();
              draw->AddTriangleFilled(ImVec2(rotation_button.x+82,rotation_button.y+15),
                                      ImVec2(rotation_button.x+90,rotation_button.y+15),
-@@ -1864,7 +2020,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1864,7 +2024,7 @@ void VideoRenderer::run(const std::string& title) {
              if (ImGui::BeginPopup("##quick_rotation")) {
                  const int selected=live_settings_->video_rotation.load()+1;
                  for (int i=0;i<IM_ARRAYSIZE(kRotationModes);++i) {
@@ -2485,7 +2584,7 @@ index 426a93a..27b5234 100644
                          live_settings_->video_rotation.store(i-1);
                  }
                  ImGui::EndPopup();
-@@ -1875,23 +2031,23 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1875,23 +2035,23 @@ void VideoRenderer::run(const std::string& title) {
              const float cx=stage_w*.5f;
              const float hero_y=(stage_h < 720 ? 90.f : std::max(105.f,(stage_h-690.f)*.3f+120.f))+firewall_offset;
              const ImVec2 tile(origin.x+cx-38,origin.y+hero_y);
@@ -2518,7 +2617,7 @@ index 426a93a..27b5234 100644
              const float steps_y=card_y+(stage_h<720?105:121);
              draw->AddLine(ImVec2(origin.x+42,origin.y+steps_y),ImVec2(origin.x+stage_w-42,origin.y+steps_y),line);
              const char* titles[]={"Same Wi-Fi network","Choose your mode","Select your PC"};
-@@ -1899,13 +2055,13 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1899,13 +2059,13 @@ void VideoRenderer::run(const std::string& title) {
              for (int i=0;i<3;++i) {
                  const float x=42+i*(width+22)/3;
                  const ImVec2 circle(origin.x+x+12,origin.y+steps_y+40);
@@ -2536,7 +2635,7 @@ index 426a93a..27b5234 100644
              const float help_w=small_font->CalcTextSizeA(16,10000,0,help).x;
              ImGui::SetCursorPos(ImVec2((stage_w-help_w)/2,steps_y+157));
              if (ui_draw::surface("##connection_help",ImVec2(help_w,22))) ImGui::OpenPopup("Connection help");
-@@ -1918,33 +2074,33 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1918,33 +2078,33 @@ void VideoRenderer::run(const std::string& title) {
              ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding,12);
              ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize,1);
              ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(10,8));
@@ -2578,7 +2677,7 @@ index 426a93a..27b5234 100644
              if (ui.page==2) decoding_note(footer_y+16);
              ImGui::SetCursorPosY(footer_y+16); ImGui::Dummy(ImVec2(1,1));
          }
-@@ -1971,12 +2127,12 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1971,12 +2131,12 @@ void VideoRenderer::run(const std::string& title) {
              if (ImGui::BeginChild("##options_panel",ImVec2(opts_bar_w-14,fh-toolbar_h-status_bar_h-16),false,
                                    kPanelFlags|ImGuiWindowFlags_AlwaysUseWindowPadding)) {
                  ImGui::PushStyleColor(ImGuiCol_Text,
@@ -2594,7 +2693,7 @@ index 426a93a..27b5234 100644
                  ImGui::PopStyleColor();
                  ImGui::Separator();
                  // Wrap descriptive text to the panel width so long
-@@ -1986,32 +2142,69 @@ void VideoRenderer::run(const std::string& title) {
+@@ -1986,32 +2146,69 @@ void VideoRenderer::run(const std::string& title) {
                  auto settings_section = [&](const char* label, ImGuiTreeNodeFlags flags = 0) {
                      ImGui::PushFont(bold_font);
                      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
@@ -2671,7 +2770,7 @@ index 426a93a..27b5234 100644
                  }
                  if (settings_section("Mirror resolution",
                          ImGuiTreeNodeFlags_DefaultOpen)) {
-@@ -2047,10 +2240,10 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2047,10 +2244,10 @@ void VideoRenderer::run(const std::string& title) {
                          const char* preview;
                          if (custom_resolution) {
                              std::snprintf(preview_buf, sizeof(preview_buf),
@@ -2684,7 +2783,7 @@ index 426a93a..27b5234 100644
                          }
  
                          ImGui::SetNextItemWidth(-1);
-@@ -2058,7 +2251,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2058,7 +2255,7 @@ void VideoRenderer::run(const std::string& title) {
                              for (int i = 0; i < (int)IM_ARRAYSIZE(presets); ++i) {
                                  const bool is_sel =
                                      (!custom_resolution && sel == i);
@@ -2693,7 +2792,7 @@ index 426a93a..27b5234 100644
                                                        is_sel)) {
                                      custom_resolution = false;
                                      live_settings_->mirror_width.store(presets[i].w);
-@@ -2067,7 +2260,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2067,7 +2264,7 @@ void VideoRenderer::run(const std::string& title) {
                                  if (is_sel) ImGui::SetItemDefaultFocus();
                              }
                              ImGui::Separator();
@@ -2702,7 +2801,7 @@ index 426a93a..27b5234 100644
                                  custom_resolution = true;
                              }
                              ImGui::EndCombo();
-@@ -2088,12 +2281,12 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2088,12 +2285,12 @@ void VideoRenderer::run(const std::string& title) {
                              if (!height_active) height_buf = cur_h;
  
                              ImGui::SetNextItemWidth(80);
@@ -2717,7 +2816,7 @@ index 426a93a..27b5234 100644
                                              &height_buf, 0, 0);
                              height_active = ImGui::IsItemActive();
  
-@@ -2105,59 +2298,59 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2105,59 +2302,59 @@ void VideoRenderer::run(const std::string& title) {
                                  height_buf != cur_h) {
                                  live_settings_->mirror_height.store(height_buf);
                              }
@@ -2796,7 +2895,7 @@ index 426a93a..27b5234 100644
                          std::string selected_folder;
                          if (browse_recording_folder(
                                  window, recording_dir.data(), selected_folder)) {
-@@ -2168,79 +2361,81 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2168,79 +2365,81 @@ void VideoRenderer::run(const std::string& title) {
                      }
  #endif
                      const char* encoder_modes[] = {
@@ -2904,7 +3003,7 @@ index 426a93a..27b5234 100644
                      }
                  }
                  if (settings_section("Frame rate")) {
-@@ -2252,54 +2447,54 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2252,54 +2451,54 @@ void VideoRenderer::run(const std::string& title) {
                          // keep the underlying fields in lockstep.
                          int cap = live_settings_->max_fps.load();
                          ImGui::SetNextItemWidth(200);
@@ -2979,7 +3078,7 @@ index 426a93a..27b5234 100644
                  ImGui::PopTextWrapPos();
              }
              ImGui::EndChild();
-@@ -2340,25 +2535,25 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2340,25 +2539,25 @@ void VideoRenderer::run(const std::string& title) {
              // "Streaming" = paired AND frames flowing; "Connected" =
              // paired but iOS quiet (static menu, paused video — common
              // in mirror); "Idle" = nothing connected.
@@ -3013,7 +3112,7 @@ index 426a93a..27b5234 100644
              sep();
              const float    mbps  =
                  payload_mbps_ema_.load(std::memory_order_relaxed);
-@@ -2382,17 +2577,17 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2382,17 +2581,17 @@ void VideoRenderer::run(const std::string& title) {
                  }
                  return std::string(buf);
              };
@@ -3035,7 +3134,7 @@ index 426a93a..27b5234 100644
              ImGui::EndTable();
              }
          }
-@@ -2410,7 +2605,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2410,7 +2609,7 @@ void VideoRenderer::run(const std::string& title) {
              const float controls_y = wide ? std::max(90.0f, (stage_h - std::min(300.0f, stage_h * .40f)) * .42f) + 180 : stage_h - controls_h;
              ImGui::SetNextWindowPos(ImVec2(stage_x + controls_x, stage_y + controls_y));
              ImGui::SetNextWindowSize(ImVec2(stage_w - controls_x - 20, controls_h));
@@ -3044,7 +3143,7 @@ index 426a93a..27b5234 100644
              ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 8));
              if (ImGui::Begin("##audio_controls", nullptr, kPanelFlags | ImGuiWindowFlags_NoScrollbar)) {
                  draw_audio_controls();
-@@ -2455,6 +2650,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2455,6 +2654,7 @@ void VideoRenderer::run(const std::string& title) {
              }
          }
  
@@ -3052,7 +3151,7 @@ index 426a93a..27b5234 100644
          publish_preferences();
          ImGui::Render();
          ImGui_ImplSDLRenderer2_RenderDrawData(
-@@ -2500,6 +2696,7 @@ void VideoRenderer::run(const std::string& title) {
+@@ -2500,6 +2700,7 @@ void VideoRenderer::run(const std::string& title) {
      ImGui_ImplSDLRenderer2_Shutdown();
      ImGui_ImplSDL2_Shutdown();
      ImGui::DestroyContext();
@@ -3061,10 +3160,27 @@ index 426a93a..27b5234 100644
      SDL_DestroyWindow(window);
      SDL_QuitSubSystem(SDL_INIT_VIDEO);
 diff --git a/src/video/video_renderer.h b/src/video/video_renderer.h
-index f69f613..5b93686 100644
+index f69f613..b164b50 100644
 --- a/src/video/video_renderer.h
 +++ b/src/video/video_renderer.h
-@@ -192,8 +192,8 @@ public:
+@@ -18,6 +18,7 @@ struct AVBufferRef;
+ }
+ 
+ namespace ap::airplay { struct LiveSettings; }
++namespace fucairserver::edge { class EdgeControl; }
+ 
+ namespace ap::video {
+ 
+@@ -179,6 +180,8 @@ public:
+     // resolution / HEVC toggles take effect on the next iPhone
+     // /info request without a process restart.
+     void set_live_settings(ap::airplay::LiveSettings* live);
++    // Non-owning; backs the Keyboard and mouse page.
++    void set_edge_control(fucairserver::edge::EdgeControl* edge) { edge_ = edge; }
+ 
+     // Wire the toolbar "Disconnect" button. Invoked from the render
+     // thread when the user clicks; should drop every connected
+@@ -192,8 +195,8 @@ public:
  
      void set_disconnect_handler(std::function<void()> h);
  
@@ -3075,6 +3191,14 @@ index f69f613..5b93686 100644
      bool user_closed() const { return closed_.load(); }
  
  private:
+@@ -305,6 +308,7 @@ private:
+     // runs), but the underlying fields are atomic so the RTSP
+     // server thread reads cleanly from /info handlers.
+     ap::airplay::LiveSettings* live_settings_ = nullptr;
++    fucairserver::edge::EdgeControl* edge_ = nullptr;
+ 
+     // Set from main(); invoked from the render thread on toolbar
+     // "Disconnect" click. Empty by default so missing wiring is
 diff --git a/tools/test_firewall.cpp b/tools/test_firewall.cpp
 index 6250674..92a078f 100644
 --- a/tools/test_firewall.cpp
