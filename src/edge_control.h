@@ -32,8 +32,9 @@ namespace fucairserver::edge {
 struct Config {
     bool enabled = true;     // accept control from paired Macs
     bool clipboard = true;   // share the clipboard with paired Macs
+    bool send_text = true;   // with the pointer on a Mac, text typed here goes to that Mac
     KeyConfig keys;
-    bool operator==(const Config& o) const { return enabled == o.enabled && clipboard == o.clipboard && keys == o.keys; }
+    bool operator==(const Config& o) const { return enabled == o.enabled && clipboard == o.clipboard && send_text == o.send_text && keys == o.keys; }
 };
 
 struct Device {

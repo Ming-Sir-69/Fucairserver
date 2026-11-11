@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index efb9bb1..2a19bba 100644
+index efb9bb1..9ef94ca 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -12,6 +12,9 @@ if(MSVC)
@@ -48,7 +48,7 @@ index efb9bb1..2a19bba 100644
      target_link_libraries(airplay-windows PRIVATE
          ws2_32 iphlpapi dnsapi dwmapi d3d11
 -        setupapi shell32 ole32 oleaut32)   # USB, Lockdown lookup and firewall COM API
-+        setupapi shell32 ole32 oleaut32 uuid bcrypt crypt32 windowscodecs)   # USB, Lockdown lookup and firewall COM API
++        setupapi shell32 ole32 oleaut32 uuid bcrypt crypt32 windowscodecs imm32)   # USB, Lockdown lookup and firewall COM API
  
      # Released as a GUI app so no empty console window pops up when
      # launched from File Explorer. main() stays the entry point — the

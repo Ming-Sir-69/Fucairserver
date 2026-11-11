@@ -5,6 +5,7 @@
 // input) goes to the PC too. Also shares the clipboard. Paused while the Mac
 // mirrors its screen to the PC. Protocol: src/edge_control.h.
 import AppKit
+import Carbon.HIToolbox
 import CryptoKit
 import Darwin
 import IOKit.pwr_mgt
@@ -241,6 +242,7 @@ final class Link {
     var onDrop: (() -> Void)?
     var onConfig: ((Bool, String) -> Void)?
     var onClip: ((UInt8, [UInt8]) -> Void)?
+    var onText: ((String) -> Void)?
 
     func connect(host: String, port: UInt16) -> Bool {
         guard let psk = FileManager.default.contents(atPath: keyPath), psk.count == 32,
@@ -311,6 +313,9 @@ final class Link {
                 let clip = p[1] & 1 != 0
                 let name = String(decoding: p[2...], as: UTF8.self)
                 DispatchQueue.main.async { self.onConfig?(clip, name) }
+            case Msg.text.rawValue where p.count >= 2:
+                let text = String(decoding: p[1...], as: UTF8.self)
+                DispatchQueue.main.async { self.onText?(text) }
             case Msg.clip.rawValue where p.count >= 2:
                 let type = p[1], data = Array(p[2...])
                 DispatchQueue.main.async { self.onClip?(type, data) }
@@ -343,6 +348,33 @@ let modifierBits: [Int64: UInt64] = [55: 0x08, 54: 0x10, 56: 0x02, 60: 0x04, 58:
 // Universal Control: an invisible field takes focus so nothing lands in Mac
 // apps, and text that Mac input methods commit there (voice input) is typed
 // on the PC. Ordinary keys never reach it; they go to the PC as key codes.
+// The other direction: with the pointer on the Mac, text entered on the PC
+// (for example its voice input) is typed here, at the Mac's focus.
+func typeOnMac(_ text: String) {
+    guard !remote else { return }
+    let source = CGEventSource(stateID: .combinedSessionState)
+    func post(_ units: [UniChar]) {
+        guard !units.isEmpty else { return }
+        for down in [true, false] {
+            let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
+            units.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: $0.baseAddress) }
+            e?.post(tap: .cgSessionEventTap)
+        }
+    }
+    var chunk: [UniChar] = []
+    for ch in text {
+        if ch == "\n" {
+            post(chunk); chunk.removeAll()
+            for down in [true, false] { CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: down)?.post(tap: .cgSessionEventTap) }
+            continue
+        }
+        let units = Array(String(ch).utf16)
+        if chunk.count + units.count > 16 { post(chunk); chunk.removeAll() }
+        chunk += units
+    }
+    post(chunk)
+}
+
 final class CaptureView: NSTextView {
     override func insertText(_ string: Any, replacementRange: NSRange) {
         let s = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
@@ -351,38 +383,61 @@ final class CaptureView: NSTextView {
     override func doCommand(by selector: Selector) {}
 }
 
-final class CaptureWindow: NSWindow {
+// A non-activating panel takes keyboard focus without making FucairEdge the
+// active app, the way Spotlight-style launchers accept typing. macOS refuses
+// to let a background app activate itself, but not this.
+final class CapturePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-var captureWindow: CaptureWindow?
-var previousApp: NSRunningApplication?
+var capturePanel: CapturePanel?
 
 func beginCapture() {
     guard config.captureInput else { return }
-    if captureWindow == nil {
-        let w = CaptureWindow(contentRect: NSRect(x: 0, y: 0, width: 2, height: 2), styleMask: .borderless, backing: .buffered, defer: false)
-        w.isOpaque = false
-        w.backgroundColor = .clear
-        w.alphaValue = 0.01
-        w.level = .floating
-        w.ignoresMouseEvents = true
-        w.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
-        w.contentView = CaptureView(frame: NSRect(x: 0, y: 0, width: 2, height: 2))
-        captureWindow = w
+    if capturePanel == nil {
+        let p = CapturePanel(contentRect: NSRect(x: 0, y: 0, width: 2, height: 2),
+                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.alphaValue = 0.01
+        p.level = .statusBar
+        p.ignoresMouseEvents = true
+        p.hidesOnDeactivate = false
+        p.becomesKeyOnlyIfNeeded = false
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        p.contentView = CaptureView(frame: NSRect(x: 0, y: 0, width: 2, height: 2))
+        capturePanel = p
     }
-    let front = NSWorkspace.shared.frontmostApplication
-    previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
-    NSApp.activate(ignoringOtherApps: true)
-    captureWindow?.makeKeyAndOrderFront(nil)
-    captureWindow?.makeFirstResponder(captureWindow?.contentView)
+    guard let p = capturePanel else { return }
+    // macOS can keep an input source per app. Carry over the one in use, so
+    // the user's input method (and its voice input) stays available here.
+    let source = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+    // Beside the parked pointer, away from the Dock and hot corners (Cocoa y grows upwards).
+    let top = NSScreen.screens.first?.frame.maxY ?? 0
+    p.setFrameOrigin(NSPoint(x: parkPoint.x + (config.side == "left" ? 4 : -6), y: top - parkPoint.y))
+    p.orderFrontRegardless()
+    p.makeKey()
+    p.makeFirstResponder(p.contentView)
+    TISSelectInputSource(source)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        guard remote else { return }
+        var focused: AnyObject?
+        AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as CFString, &focused)
+        var pid: pid_t = 0
+        if let app = focused { AXUIElementGetPid(app as! AXUIElement, &pid) }
+        log("input capture: panel key=\(p.isKeyWindow) self=\(pid == ProcessInfo.processInfo.processIdentifier) " +
+            "source=\(inputSourceID(source)) now=\(inputSourceID(TISCopyCurrentKeyboardInputSource().takeRetainedValue()))")
+    }
+}
+
+func inputSourceID(_ source: TISInputSource) -> String {
+    guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return "?" }
+    return Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
 }
 
 func endCapture() {
-    guard let w = captureWindow, w.isVisible else { return }
-    w.orderOut(nil)
-    previousApp?.activate()
-    previousApp = nil
+    guard let p = capturePanel, p.isVisible else { return }
+    p.orderOut(nil)
 }
 
 // MARK: - Edge logic
@@ -595,6 +650,7 @@ final class App: NSObject, NSApplicationDelegate {
             self.refresh()
         }
         link.onClip = { type, data in applyClipboard(type, data) }
+        link.onText = { text in typeOnMac(text) }
         discovery.start()
         refresh()
         allowBackgroundCursorHiding()

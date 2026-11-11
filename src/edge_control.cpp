@@ -11,6 +11,7 @@
 #include <dpapi.h>
 #include <objbase.h>
 #include <wincodec.h>
+#include <imm.h>
 #include <openssl/evp.h>
 
 #include <algorithm>
@@ -209,15 +210,17 @@ public:
         SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0);
         hidden_ = false;
     }
-    void poll() {
+    // True when the PC's own mouse moved the hidden pointer.
+    bool poll() {
         POINT p;
         bool moved;
         {
             std::lock_guard<std::mutex> lock(mu_);
-            if (!hidden_ || !GetCursorPos(&p)) return;
+            if (!hidden_ || !GetCursorPos(&p)) return false;
             moved = p.x != park_.x || p.y != park_.y;
         }
         if (moved) show();
+        return moved;
     }
 private:
     std::mutex mu_;
@@ -334,7 +337,7 @@ public:
         if (active_) cursor_.hide();
         active_ = false;
     }
-    void poll_cursor() { cursor_.poll(); }
+    bool poll_cursor() { return cursor_.poll(); }
     void restore_cursor() { cursor_.show(); }
 
 private:
@@ -470,6 +473,14 @@ struct EdgeControl::Impl {
     Clip last_clip;
     DWORD ignore_sequence = 0;
 
+    // Input capture: once the pointer has gone to a Mac, focus follows it.
+    // A hidden field takes keyboard focus on this PC, and text that lands
+    // there (voice input, typing) is entered on that Mac instead.
+    std::mutex capture_mu;
+    std::shared_ptr<Session> capture_target;
+    HWND capture_window = nullptr, capture_edit = nullptr, capture_previous = nullptr;  // clipboard thread
+    bool capture_clearing = false;
+
     // ---- Persistence ----
     std::filesystem::path config_path() const { return dir / L"edge-control.ini"; }
     std::filesystem::path devices_path() const { return dir / L"edge-devices.dat"; }
@@ -487,6 +498,7 @@ struct EdgeControl::Impl {
             const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
             if (k == "enabled") cfg.enabled = v == "1";
             else if (k == "clipboard") cfg.clipboard = v == "1";
+            else if (k == "send_text") cfg.send_text = v == "1";
             else if (k == "pc_id") have_id = unhex(v, pc_id.data(), pc_id.size());
             else if (k == "command" || k == "option" || k == "control") {
                 const int n = std::atoi(v.c_str());
@@ -528,6 +540,7 @@ struct EdgeControl::Impl {
         std::ofstream out(config_path(), std::ios::trunc);
         out << "enabled=" << (cfg.enabled ? 1 : 0) << '\n'
             << "clipboard=" << (cfg.clipboard ? 1 : 0) << '\n'
+            << "send_text=" << (cfg.send_text ? 1 : 0) << '\n'
             << "pc_id=" << hex(pc_id.data(), pc_id.size()) << '\n'
             << "command=" << int(cfg.keys.command) << '\n'
             << "option=" << int(cfg.keys.option) << '\n'
@@ -667,6 +680,7 @@ struct EdgeControl::Impl {
                         if (ok) {
                             if (controller && controller != s) input.deactivate();
                             controller = s;
+                            cancel_capture();
                             input.enter(yfrac, p[2] != 0, n >= 4 && p[3] != 0);
                         }
                     }
@@ -690,6 +704,7 @@ struct EdgeControl::Impl {
                     if (left) {
                         const uint16_t y = uint16_t(std::clamp(yfrac, 0.0, 1.0) * 65535);
                         send(*s, {kLeave, uint8_t(y >> 8), uint8_t(y)});
+                        request_capture(s);
                     }
                     break;
                 }
@@ -699,7 +714,7 @@ struct EdgeControl::Impl {
                 case kMedia: if (n >= 2) { std::lock_guard<std::mutex> lock(input_mu); if (controller == s) input.media(p[0], p[1] != 0); } break;
                 case kText: { std::lock_guard<std::mutex> lock(input_mu); if (controller == s) input.text(std::string((const char*)p, n)); } break;
                 case kPing: send(*s, {kPing}); break;   // lets the Mac notice a vanished PC quickly
-                case kRelease: release_control(s); break;
+                case kRelease: release_control(s); request_capture(s); break;
                 case kClip:
                     if (n >= 1 && n - 1 <= kMaxClip && clipboard_allowed(id)) {
                         Clip c{p[0], Bytes(p + 1, p + n)};
@@ -714,6 +729,13 @@ struct EdgeControl::Impl {
             }
         }
         release_control(s);
+        {
+            std::lock_guard<std::mutex> lock(capture_mu);
+            if (capture_target == s) {
+                capture_target.reset();
+                if (HWND w = clip_window.load()) PostMessageW(w, WM_APP + 3, 0, 0);
+            }
+        }
         if (authenticated) {
             std::lock_guard<std::mutex> lock(mu);
             sessions.erase(std::remove(sessions.begin(), sessions.end(), s), sessions.end());
@@ -820,11 +842,105 @@ struct EdgeControl::Impl {
         }
     }
 
+    // ---- Input capture (runs on the clipboard thread) ----
+    void request_capture(const std::shared_ptr<Session>& s) {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (!cfg.enabled || !cfg.send_text) return;
+        }
+        { std::lock_guard<std::mutex> lock(capture_mu); capture_target = s; }
+        if (HWND w = clip_window.load()) PostMessageW(w, WM_APP + 2, 0, 0);
+    }
+
+    void cancel_capture() {
+        {
+            std::lock_guard<std::mutex> lock(capture_mu);
+            if (!capture_target) return;
+            capture_target.reset();
+        }
+        if (HWND w = clip_window.load()) PostMessageW(w, WM_APP + 3, 0, 0);
+    }
+
+    // Windows only lets the foreground thread hand over focus; borrow its input state.
+    static void bring_forward(HWND w, HWND focus) {
+        const DWORD me = GetCurrentThreadId();
+        const DWORD fg = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+        const bool attach = fg && fg != me && AttachThreadInput(me, fg, TRUE);
+        BringWindowToTop(w);
+        SetForegroundWindow(w);
+        if (focus) SetFocus(focus);
+        if (attach) AttachThreadInput(me, fg, FALSE);
+    }
+
+    void begin_capture() {
+        { std::lock_guard<std::mutex> lock(capture_mu); if (!capture_target) return; }
+        if (!capture_window) {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = clip_proc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"FucairserverEdgeCapture";
+            RegisterClassW(&wc);
+            capture_window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, wc.lpszClassName, L"",
+                                             WS_POPUP, 0, 0, 8, 8, nullptr, nullptr, wc.hInstance, nullptr);
+            if (!capture_window) return;
+            SetWindowLongPtrW(capture_window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+            SetLayeredWindowAttributes(capture_window, 0, 1, LWA_ALPHA);
+            capture_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+                                           0, 0, 8, 8, capture_window, reinterpret_cast<HMENU>(1), wc.hInstance, nullptr);
+        }
+        const HWND fg = GetForegroundWindow();
+        if (fg && fg != capture_window) capture_previous = fg;
+        POINT p{};
+        GetCursorPos(&p);
+        SetWindowPos(capture_window, HWND_TOPMOST, p.x - 12, p.y - 12, 8, 8, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        bring_forward(capture_window, capture_edit);
+        LOG_INFO << "edge: input capture on (focus " << (GetForegroundWindow() == capture_window ? "taken" : "refused") << ")";
+    }
+
+    void end_capture() {
+        if (!capture_window || !IsWindowVisible(capture_window)) return;
+        const bool had_focus = GetForegroundWindow() == capture_window;
+        ShowWindow(capture_window, SW_HIDE);
+        if (had_focus && capture_previous && IsWindow(capture_previous)) bring_forward(capture_previous, nullptr);
+        capture_previous = nullptr;
+        capture_clearing = true;
+        SetWindowTextW(capture_edit, L"");
+        capture_clearing = false;
+    }
+
+    void capture_changed() {
+        if (capture_clearing) return;
+        // Wait for the input method to commit; its composition is not text yet.
+        if (HIMC imc = ImmGetContext(capture_edit)) {
+            const LONG composing = ImmGetCompositionStringW(imc, GCS_COMPSTR, nullptr, 0);
+            ImmReleaseContext(capture_edit, imc);
+            if (composing > 0) return;
+        }
+        const int n = GetWindowTextLengthW(capture_edit);
+        if (n <= 0) return;
+        std::wstring w(size_t(n) + 1, L'\0');
+        w.resize(size_t(GetWindowTextW(capture_edit, w.data(), n + 1)));
+        capture_clearing = true;
+        SetWindowTextW(capture_edit, L"");
+        capture_clearing = false;
+        std::string text = narrow(w.data(), w.size());
+        text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+        std::shared_ptr<Session> target;
+        { std::lock_guard<std::mutex> lock(capture_mu); target = capture_target; }
+        if (!target || text.empty()) return;
+        Bytes m{kText};
+        append(m, text.data(), text.size());
+        send(*target, m);
+    }
+
     // ---- Clipboard ----
     static LRESULT CALLBACK clip_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* self = reinterpret_cast<Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (self && msg == WM_CLIPBOARDUPDATE) { self->clipboard_changed(hwnd); return 0; }
         if (self && msg == WM_APP + 1) { self->apply_incoming(hwnd); return 0; }
+        if (self && msg == WM_APP + 2) { self->begin_capture(); return 0; }
+        if (self && msg == WM_APP + 3) { self->end_capture(); return 0; }
+        if (self && msg == WM_COMMAND && HIWORD(wp) == EN_CHANGE) { self->capture_changed(); return 0; }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 
@@ -965,7 +1081,7 @@ bool EdgeControl::start(const std::filesystem::path& dir, uint16_t port) {
     m.clip_thread = std::thread([&m] { m.clip_loop(); });
     m.cursor_thread = std::thread([&m] {
         while (!m.stopping) {
-            m.input.poll_cursor();
+            if (m.input.poll_cursor()) m.cancel_capture();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     });

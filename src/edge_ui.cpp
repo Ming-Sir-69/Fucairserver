@@ -82,6 +82,7 @@ void draw_edge_page(EdgeControl& edge, ImFont* bold_font, ImFont* small_font, fl
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width);
 
     changed |= ImGui::Checkbox(tr("Let a paired Mac use its keyboard and mouse here"), &cfg.enabled);
+    changed |= ImGui::Checkbox(tr("Focus follows the pointer: while it is on the Mac, text entered on this PC, such as voice input, goes to the Mac"), &cfg.send_text);
     std::string controlling;
     int online = 0;
     for (const auto& d : st.devices) { if (d.controlling) controlling = d.name; if (d.online) ++online; }

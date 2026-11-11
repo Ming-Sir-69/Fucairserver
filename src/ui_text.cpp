@@ -217,6 +217,8 @@ constexpr Entry kText[] = {
     {"Keyboard and mouse", "键鼠跨屏"},
     {"One keyboard and mouse.", "一套键鼠，两台电脑。"},
     {"Let a paired Mac use its keyboard and mouse here", "允许已配对的 Mac 用它的键盘和鼠标控制这台电脑"},
+    {"Focus follows the pointer: while it is on the Mac, text entered on this PC, such as voice input, goes to the Mac",
+     "焦点跟随指针：指针在 Mac 上时，这台电脑上输入的文字（例如语音输入）会输入到 Mac"},
     {"Edge control is not running.", "键鼠跨屏没有运行。"},
     {"Another program is using the edge control port.", "另一个程序占用了键鼠跨屏所需的端口（7021）。"},
     {"Turned off. Paired Macs stay paired.", "已关闭。已配对的 Mac 会保留配对。"},
