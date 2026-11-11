@@ -55,26 +55,53 @@ var appeared: [AudioDeviceID: Date] = [:]
 var previous = defaultOutput()
 if isTarget(previous) { previous = 0 }
 
+let queue = DispatchQueue(label: "keep-mac-audio")
+var watch: DispatchSourceTimer?
+
 func refreshDevices() {
     let now = Set(devices())
-    for id in now.subtracting(known) where isTarget(id) { appeared[id] = Date() }
+    for id in now.subtracting(known) where isTarget(id) {
+        appeared[id] = Date()
+        startWatching()
+    }
     for id in known.subtracting(now) { appeared[id] = nil }
     known = now
 }
-func handleDefaultChange() {
-    refreshDevices()
-    let current = defaultOutput()
-    guard isTarget(current) else { previous = current; return }
-    guard let since = appeared[current], Date().timeIntervalSince(since) <= window else { return }
-    guard previous != 0, known.contains(previous) else { log("mirroring took the output; no previous output to restore"); return }
-    let status = setOutput(previous)
-    log("mirroring to \(target) took the output; restored \(name(previous)) status=\(status)")
+
+// macOS switches the output shortly after the receiver's device appears, and
+// CoreAudio may deliver that notification late. Poll during the window so the
+// previous output comes back within milliseconds of the switch.
+func startWatching() {
+    watch?.cancel()
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+    timer.setEventHandler { check() }
+    timer.resume()
+    watch = timer
 }
 
-let queue = DispatchQueue(label: "keep-mac-audio")
+func check() {
+    let current = defaultOutput()
+    guard isTarget(current) else {
+        if current != 0 { previous = current }
+        if let w = watch, !appeared.values.contains(where: { Date().timeIntervalSince($0) <= window }) {
+            w.cancel(); watch = nil
+        }
+        return
+    }
+    if appeared[current] == nil && !known.contains(current) { refreshDevices() }
+    guard let since = appeared[current], Date().timeIntervalSince(since) <= window else { return }
+    appeared[current] = .distantPast
+    watch?.cancel(); watch = nil
+    guard previous != 0, Set(devices()).contains(previous) else { log("mirroring took the output; no previous output to restore"); return }
+    let status = setOutput(previous)
+    let ms = Int(Date().timeIntervalSince(since) * 1000)
+    log("mirroring to \(target) took the output; restored \(name(previous)) status=\(status) \(ms)ms after the device appeared")
+}
+
 var listDevices = addr(kAudioHardwarePropertyDevices)
-AudioObjectAddPropertyListenerBlock(system, &listDevices, queue) { _, _ in refreshDevices() }
+AudioObjectAddPropertyListenerBlock(system, &listDevices, queue) { _, _ in refreshDevices(); check() }
 var defaultDevice = addr(kAudioHardwarePropertyDefaultOutputDevice)
-AudioObjectAddPropertyListenerBlock(system, &defaultDevice, queue) { _, _ in handleDefaultChange() }
+AudioObjectAddPropertyListenerBlock(system, &defaultDevice, queue) { _, _ in check() }
 log("started; watching \(target); current output \(name(defaultOutput()))")
 dispatchMain()
