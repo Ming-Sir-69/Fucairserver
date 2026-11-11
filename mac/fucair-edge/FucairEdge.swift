@@ -525,6 +525,7 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
         return Unmanaged.passUnretained(event)
     }
     let isMove = type == .mouseMoved || type == .leftMouseDragged || type == .rightMouseDragged || type == .otherMouseDragged
+    probeEvent(type, event)
     if !remote {
         if isMove && tryEnter(event.location, event.getDoubleValueField(.mouseEventDeltaX)) { return nil }
         return Unmanaged.passUnretained(event)
@@ -606,6 +607,61 @@ func startModifierDiagnostics() {
     hidManager = m
 }
 
+// Key probe, started from the menu: for a short time, records every key event
+// from every keyboard, as raw HID usage (with the keyboard's name) and as the
+// event macOS delivers, wherever the pointer is. For comparing keyboards and
+// systems key by key; the file stays in ~/.fucairserver.
+var probeFile: FileHandle?
+var probeManager: IOHIDManager?
+
+func probeWrite(_ fields: String) {
+    probeFile?.write((stamp.string(from: Date()) + "\t" + fields + "\n").data(using: .utf8)!)
+}
+
+func startProbe(seconds: Double, done: @escaping (String) -> Void) {
+    guard probeFile == nil else { return }
+    let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"
+    let path = home + "/keyprobe-mac-\(f.string(from: Date())).tsv"
+    FileManager.default.createFile(atPath: path, contents: "time\tsource\tkind\tcode\tvalue\tdetail\n".data(using: .utf8))
+    probeFile = FileHandle(forWritingAtPath: path)
+    probeFile?.seekToEndOfFile()
+    let m = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    IOHIDManagerSetDeviceMatchingMultiple(m, [
+        [kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop, kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard],
+        [kIOHIDDeviceUsagePageKey: kHIDPage_Consumer, kIOHIDDeviceUsageKey: kHIDUsage_Csmr_ConsumerControl],
+    ] as CFArray)
+    IOHIDManagerRegisterInputValueCallback(m, { _, _, _, value in
+        let element = IOHIDValueGetElement(value)
+        let page = IOHIDElementGetUsagePage(element), usage = IOHIDElementGetUsage(element)
+        guard (page == kHIDPage_KeyboardOrKeypad && usage >= 0x04 && usage <= 0xE7) || page == kHIDPage_Consumer else { return }
+        let name = IOHIDDeviceGetProperty(IOHIDElementGetDevice(element), kIOHIDProductKey as CFString) as? String ?? "?"
+        probeWrite("hid\tpage=0x\(String(page, radix: 16))\t0x\(String(usage, radix: 16))\t\(IOHIDValueGetIntegerValue(value))\t\(name)")
+    }, nil)
+    IOHIDManagerScheduleWithRunLoop(m, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    IOHIDManagerOpen(m, IOOptionBits(kIOHIDOptionsTypeNone))
+    probeManager = m
+    log("key probe started: \(path)")
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+        if let m = probeManager { IOHIDManagerClose(m, IOOptionBits(kIOHIDOptionsTypeNone)) }
+        probeManager = nil
+        try? probeFile?.close()
+        probeFile = nil
+        log("key probe finished")
+        done(path)
+    }
+}
+
+func probeEvent(_ type: CGEventType, _ event: CGEvent) {
+    guard probeFile != nil, [.keyDown, .keyUp, .flagsChanged].contains(type) || type.rawValue == 14 else { return }
+    var detail = "flags=0x" + String(event.flags.rawValue, radix: 16)
+    if type.rawValue == 14, let ns = NSEvent(cgEvent: event) {
+        guard ns.subtype.rawValue == 8 else { return }
+        detail += " data1=0x" + String(ns.data1, radix: 16)
+    }
+    let kind = type == .keyDown ? "down" : type == .keyUp ? "up" : type == .flagsChanged ? "flags" : "system"
+    probeWrite("tap\t\(kind)\t\(event.getIntegerValueField(.keyboardEventKeycode))\t\(remote ? "to-pc" : "mac")\t\(detail)")
+}
+
 // MARK: - Clipboard
 
 var lastChangeCount = NSPasteboard.general.changeCount
@@ -667,13 +723,14 @@ final class App: NSObject, NSApplicationDelegate {
     let rightItem = NSMenuItem(title: "电脑在 Mac 右边", action: #selector(setRight), keyEquivalent: "")
     let captureItem = NSMenuItem(title: "控制电脑时，Mac 上的语音输入也发到电脑", action: #selector(toggleCapture), keyEquivalent: "")
     let pairItem = NSMenuItem(title: "与电脑配对…", action: #selector(pairMenu), keyEquivalent: "")
+    let probeItem = NSMenuItem(title: "录制按键 30 秒（键位对照）", action: #selector(probeMenu), keyEquivalent: "")
     var note: String?
     var pairing = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
-        for i in [status, NSMenuItem.separator(), toggle, leftItem, rightItem, captureItem, NSMenuItem.separator(), pairItem] { menu.addItem(i) }
+        for i in [status, NSMenuItem.separator(), toggle, leftItem, rightItem, captureItem, NSMenuItem.separator(), pairItem, probeItem] { menu.addItem(i) }
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         for i in menu.items { i.target = self }
         item.menu = menu
@@ -750,7 +807,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func refresh() {
-        item.button?.title = remote ? "⇆●" : "⇆"
+        item.button?.title = probeFile != nil ? "⇆ REC" : remote ? "⇆●" : "⇆"
         let name = config.pcName.isEmpty ? "电脑" : config.pcName
         if let note = note { status.title = note }
         else if !paired() { status.title = "未配对：选择“与电脑配对…”" }
@@ -817,6 +874,16 @@ final class App: NSObject, NSApplicationDelegate {
                 self.refresh()
             }
         }.start()
+    }
+
+    @objc func probeMenu() {
+        guard probeFile == nil else { return }
+        probeItem.title = "正在录制按键…（30 秒）"
+        item.button?.title = "⇆ REC"
+        startProbe(seconds: 30) { _ in
+            self.probeItem.title = "录制按键 30 秒（键位对照）"
+            self.refresh()
+        }
     }
 
     @objc func toggleEnabled() { enabled.toggle(); if !enabled { returnHere(0.5, notifyPC: true) }; refresh() }
