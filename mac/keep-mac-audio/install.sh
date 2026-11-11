@@ -28,7 +28,7 @@ cat > "$plist" <<PL
   <array><string>$dir/keep-mac-audio</string><string>$receiver</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>
 PL

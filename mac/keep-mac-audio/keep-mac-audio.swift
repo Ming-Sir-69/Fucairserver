@@ -13,8 +13,13 @@ let system = AudioObjectID(kAudioObjectSystemObject)
 func addr(_ s: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress(mSelector: s, mScope: scope, mElement: kAudioObjectPropertyElementMain)
 }
+let stamp: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
 func log(_ text: String) {
-    let line = ISO8601DateFormatter().string(from: Date()) + " " + text + "\n"
+    let line = stamp.string(from: Date()) + " " + text + "\n"
     let url = URL(fileURLWithPath: NSHomeDirectory() + "/.fucairserver/keep-mac-audio.log")
     if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
     else { try? line.write(to: url, atomically: true, encoding: .utf8) }
@@ -55,7 +60,9 @@ var appeared: [AudioDeviceID: Date] = [:]
 var previous = defaultOutput()
 if isTarget(previous) { previous = 0 }
 
-let queue = DispatchQueue(label: "keep-mac-audio")
+// Notifications for the mirroring switch arrive hundreds of milliseconds
+// late on a throttled background queue; handle them at interactive priority.
+let queue = DispatchQueue(label: "keep-mac-audio", qos: .userInteractive)
 
 func refreshDevices() {
     let now = Set(devices())
@@ -81,9 +88,23 @@ func check() {
     log("mirroring to \(target) took the output; restored \(name(previous)) status=\(status) \(ms)ms after the device appeared")
 }
 
+// Timing trace for tuning: active only while ~/.fucairserver/keep-mac-audio.trace exists.
+let traceFlag = NSHomeDirectory() + "/.fucairserver/keep-mac-audio.trace"
+func trace(_ event: String) {
+    guard FileManager.default.fileExists(atPath: traceFlag) else { return }
+    let current = defaultOutput()
+    var t: UInt32 = 0; var size = UInt32(4)
+    var a = addr(kAudioDevicePropertyTransportType)
+    AudioObjectGetPropertyData(current, &a, 0, nil, &size, &t)
+    let transport = withUnsafeBytes(of: t.bigEndian) { String(bytes: Array($0), encoding: .ascii) ?? "?" }
+    log("trace \(event): default=\(current) [\(transport)] '\(name(current))' listed=\(Set(devices()).contains(current)) target=\(isTarget(current))")
+}
+
 var listDevices = addr(kAudioHardwarePropertyDevices)
-AudioObjectAddPropertyListenerBlock(system, &listDevices, queue) { _, _ in refreshDevices(); check() }
+AudioObjectAddPropertyListenerBlock(system, &listDevices, queue) { _, _ in trace("devices"); refreshDevices(); check() }
 var defaultDevice = addr(kAudioHardwarePropertyDefaultOutputDevice)
-AudioObjectAddPropertyListenerBlock(system, &defaultDevice, queue) { _, _ in check() }
+AudioObjectAddPropertyListenerBlock(system, &defaultDevice, queue) { _, _ in trace("default"); check() }
+var systemDevice = addr(kAudioHardwarePropertyDefaultSystemOutputDevice)
+AudioObjectAddPropertyListenerBlock(system, &systemDevice, queue) { _, _ in trace("system-default") }
 log("started; watching \(target); current output \(name(defaultOutput()))")
 dispatchMain()
